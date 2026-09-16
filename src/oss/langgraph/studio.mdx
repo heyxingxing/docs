@@ -2,25 +2,25 @@
 title: LangSmith Studio
 ---
 
-When building agents with LangChain locally, it's helpful to visualize what's happening inside your agent, interact with it in real-time, and debug issues as they occur. **LangSmith Studio** is a free visual interface for developing and testing your LangChain agents from your local machine.
+在本地使用 LangChain 构建智能体时，如果能够看到智能体内部发生了什么、实时与它交互，并在问题出现时直接调试，会非常有帮助。**LangSmith Studio** 是一个免费的可视化界面，可用于在本地开发和测试 LangChain 智能体。
 
-Studio connects to your locally running agent to show you each step your agent takes: the prompts sent to the model, tool calls and their results, and the final output. You can test different inputs, inspect intermediate states, and iterate on your agent's behavior without additional code or deployment.
+Studio 会连接到你本地运行的智能体，并展示智能体执行的每一步：发送给模型的 Prompt、工具调用及其结果，以及最终输出。你可以测试不同输入、检查中间状态，并在不额外编写代码或部署的情况下快速迭代智能体行为。
 
-This pages describes how to set up Studio with your local LangChain agent.
+本页介绍如何为本地 LangChain 智能体配置 Studio。
 
-## Prerequisites
+## 前置条件
 
-Before you begin, ensure you have the following:
+开始之前，请确保你已经拥有：
 
-- **A LangSmith account**: Sign up (for free) or log in at [smith.langchain.com](https://smith.langchain.com).
-- **A LangSmith API key**: Follow the [Create an API key](/langsmith/create-account-api-key) guide.
-- If you don't want data [traced](/langsmith/observability-concepts#traces) to LangSmith, set `LANGSMITH_TRACING=false` in your application's `.env` file. With tracing disabled, no data leaves your local server.
+- **LangSmith 账号**：在 [smith.langchain.com](https://smith.langchain.com) 免费注册或登录。
+- **LangSmith API Key**：按照[创建 API Key](/langsmith/create-account-api-key)指南完成创建。
+- 如果你不希望数据被 [Trace](/langsmith/observability-concepts#traces) 到 LangSmith，请在应用的 `.env` 文件中设置 `LANGSMITH_TRACING=false`。关闭 Tracing 后，数据不会离开本地服务器。
 
-## Set up local Agent server
+## 配置本地 Agent Server
 
-### 1. Install the LangGraph CLI
+### 1. 安装 LangGraph CLI
 
-The [LangGraph CLI](/langsmith/cli) provides a local development server (also called [Agent Server](/langsmith/agent-server)) that connects your agent to Studio.
+[LangGraph CLI](/langsmith/cli) 提供本地开发服务器（也称为 [Agent Server](/langsmith/agent-server)），用于将你的智能体连接到 Studio。
 
 :::python
 ```shell
@@ -35,9 +35,9 @@ npx @langchain/langgraph-cli
 ```
 :::
 
-### 2. Prepare your agent
+### 2. 准备智能体
 
-If you already have a LangChain agent, you can use it directly. This example uses a simple email agent:
+如果你已经有 LangChain 智能体，可以直接使用。下面示例使用一个简单的邮件智能体：
 
 :::python
 ```python title="agent.py"
@@ -88,21 +88,21 @@ export { agent };
 ```
 :::
 
-### 3. Environment variables
+### 3. 环境变量
 
-Studio requires a LangSmith API key to connect your local agent. Create a `.env` file in the root of your project and add your API key from [LangSmith](https://smith.langchain.com/settings).
+Studio 需要 LangSmith API Key 才能连接到你的本地智能体。在项目根目录创建 `.env` 文件，并添加从 [LangSmith](https://smith.langchain.com/settings) 获取的 API Key。
 
 <Warning>
-    Ensure your `.env` file is not committed to version control, such as Git.
+    请确保 `.env` 文件不会被提交到 Git 等版本控制系统中。
 </Warning>
 
 ```bash .env
 LANGSMITH_API_KEY=lsv2...
 ```
 
-### 4. Create a LangGraph config file
+### 4. 创建 LangGraph 配置文件
 
-The LangGraph CLI uses a configuration file to locate your agent and manage dependencies. Create a `langgraph.json` file in your app's directory:
+LangGraph CLI 使用配置文件来定位你的智能体并管理依赖。在应用目录中创建 `langgraph.json`：
 
 :::python
 ```json title="langgraph.json"
@@ -129,18 +129,18 @@ The LangGraph CLI uses a configuration file to locate your agent and manage depe
 :::
 
 :::python
-The @[`create_agent`] function automatically returns a compiled LangGraph graph, which is what the `graphs` key expects in the configuration file.
+@[`create_agent`] 函数会自动返回一个已经编译的 LangGraph 图，这正是配置文件中 `graphs` 字段所需要的对象。
 :::
 
 :::js
-The @[`createAgent`] function automatically returns a compiled LangGraph graph, which is what the `graphs` key expects in the configuration file.
+@[`createAgent`] 函数会自动返回一个已经编译的 LangGraph 图，这正是配置文件中 `graphs` 字段所需要的对象。
 :::
 
 <Info>
-For detailed explanations of each key in the JSON object of the configuration file, refer to the [LangGraph configuration file reference](/langsmith/cli#configuration-file).
+关于配置文件 JSON 对象中各字段的详细解释，请参阅 [LangGraph 配置文件参考](/langsmith/cli#configuration-file)。
 </Info>
 
-At this point, the project structure will look like this:
+此时项目结构如下：
 
 :::python
 ```bash
@@ -163,10 +163,10 @@ my-app/
 ```
 :::
 
-### 5. Install dependencies
+### 5. 安装依赖
 
 :::python
-Install your project dependencies from the root directory:
+在项目根目录安装依赖：
 
 <CodeGroup>
 ```shell pip
@@ -184,9 +184,9 @@ yarn install
 ```
 :::
 
-### 6. View your agent in Studio
+### 6. 在 Studio 中查看智能体
 
-Start the development server to connect your agent to Studio:
+启动开发服务器，将智能体连接到 Studio：
 
 :::python
 ```shell
@@ -201,29 +201,29 @@ npx @langchain/langgraph-cli dev
 :::
 
 <Warning>
-Safari blocks `localhost` connections to Studio. To work around this, run the above command with `--tunnel` to access Studio via a secure tunnel. You'll need to manually add the tunnel URL to allowed origins by clicking **Connect to a local server** in the Studio UI. See the [troubleshooting guide](/langsmith/troubleshooting-studio#safari-connection-issues) for steps.
+Safari 会阻止 Studio 连接 `localhost`。可以在上述命令后添加 `--tunnel`，通过安全隧道访问 Studio。随后需要在 Studio UI 中点击 **Connect to a local server**，手动把 Tunnel URL 添加到允许的 Origin。具体步骤请参阅[故障排查指南](/langsmith/troubleshooting-studio#safari-connection-issues)。
 </Warning>
 
-Once the server is running, your agent is accessible both via API at `http://127.0.0.1:2024` and through the Studio UI at `https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024`:
+服务器启动后，可以通过 `http://127.0.0.1:2024` 的 API 访问智能体，也可以通过 `https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024` 在 Studio UI 中访问：
 
 <Frame>
-![Agent view in the Studio UI](/oss/images/studio_create-agent.png)
+![Studio UI 中的智能体视图](/oss/images/studio_create-agent.png)
 </Frame>
 
-With Studio connected to your local agent, you can iterate quickly on your agent's behavior. Run a test input, inspect the full execution trace including prompts, tool arguments, return values, and token/latency metrics in [LangSmith](/langsmith/observability-studio). When something goes wrong, Studio captures exceptions with the surrounding state to help you understand what happened.
+Studio 连接本地智能体后，你就可以快速迭代智能体行为。运行测试输入，并在 [LangSmith](/langsmith/observability-studio) 中检查完整执行 Trace，包括 Prompt、工具参数、返回值以及 Token/延迟指标。当出现问题时，Studio 会连同周围状态一起记录异常，帮助你理解具体发生了什么。
 
-The development server supports hot-reloading—make changes to prompts or tool signatures in your code, and Studio reflects them immediately. Re-run conversation threads from any step to test your changes without starting over. This workflow scales from simple single-tool agents to complex multi-node graphs.
+开发服务器支持热重载（Hot Reload）：修改代码中的 Prompt 或工具签名后，Studio 会立即反映这些变化。你还可以从对话线程中的任意步骤重新运行，以测试修改效果，而无需从头开始。这套工作流既适用于简单的单工具智能体，也能扩展到复杂的多节点图。
 
-For more information on how to run Studio, refer to the following guides in the [LangSmith docs](/langsmith/observability):
+有关 Studio 的更多用法，请参阅 [LangSmith 文档](/langsmith/observability)中的以下指南：
 
-- [Run application](/langsmith/use-studio#run-application)
-- [Manage assistants](/langsmith/use-studio#manage-assistants)
-- [Manage threads](/langsmith/use-studio#manage-threads)
-- [Iterate on prompts](/langsmith/observability-studio)
-- [Debug LangSmith traces](/langsmith/observability-studio#debug-langsmith-traces)
-- [Add node to dataset](/langsmith/observability-studio#add-node-to-dataset)
+- [运行应用](/langsmith/use-studio#run-application)
+- [管理 Assistant](/langsmith/use-studio#manage-assistants)
+- [管理 Thread](/langsmith/use-studio#manage-threads)
+- [迭代 Prompt](/langsmith/observability-studio)
+- [调试 LangSmith Trace](/langsmith/observability-studio#debug-langsmith-traces)
+- [将节点添加到 Dataset](/langsmith/observability-studio#add-node-to-dataset)
 
-## Video guide
+## 视频指南
 
 <Frame>
 <iframe
