@@ -1,6 +1,6 @@
 ---
-title: Persistence
-description: LangGraph's persistence layer gives agents short-term memory through checkpointers and long-term memory through stores.
+title: 持久化
+description: LangGraph 的持久化层通过 Checkpointer 为智能体提供短期记忆，并通过 Store 提供长期记忆。
 ---
 
 {/* Anchor stubs for backwards-compatible deep links */}
@@ -11,18 +11,18 @@ description: LangGraph's persistence layer gives agents short-term memory throug
 <a id="pending-writes" />
 <a id="durability-modes" />
 
-Persistence lets LangGraph applications keep useful information beyond a single graph run. It matters when an agent needs to continue a conversation, resume after an interruption, recover from a failure, or remember information across interactions.
+持久化使 LangGraph 应用能够在单次图运行结束后继续保留有用信息。当智能体需要延续对话、在中断后恢复、从故障中恢复，或跨多次交互记住信息时，持久化就非常重要。
 
-LangGraph provides two complementary persistence systems:
+LangGraph 提供两套互补的持久化系统：
 
-- **[Checkpointers](/oss/langgraph/checkpointers)** persist a thread's graph state as checkpoints. Use them for short-term, thread-scoped memory, including conversation continuity, human-in-the-loop workflows, time travel, and fault tolerance.
-- **[Stores](/oss/langgraph/stores)** persist application-defined data outside the graph state. Use them for long-term, cross-thread memory, including user preferences, facts, and shared knowledge.
+- **[Checkpointer](/oss/langgraph/checkpointers)** 将一个线程（Thread）的图状态保存为检查点（Checkpoint）。它适用于短期、线程范围内的记忆，包括保持对话连续性、人在回路工作流、时间旅行以及容错。
+- **[Store](/oss/langgraph/stores)** 将应用自定义的数据持久化到图状态之外。它适用于长期、跨线程记忆，例如用户偏好、事实信息和共享知识。
 
-Most applications can use both: a [checkpointer](/oss/langgraph/checkpointers) tracks the current thread, and a [store](/oss/langgraph/stores) tracks durable information across threads.
+多数应用可以同时使用二者：[Checkpointer](/oss/langgraph/checkpointers) 跟踪当前线程，[Store](/oss/langgraph/stores) 则维护跨线程的持久信息。
 
-## Quickstart
+## 快速入门
 
-Compile your graph with a checkpointer, a store, or both:
+在编译图时传入 Checkpointer、Store，或者同时传入二者：
 
 :::python
 ```python
@@ -58,28 +58,29 @@ const result = await graph.invoke(
 :::
 
 <Info>
-**Agent Server handles persistence automatically**
-When using the [Agent Server](/langsmith/agent-server), you do not need to implement or configure checkpointers or stores manually. The server handles persistence infrastructure behind the scenes.
+**Agent Server 会自动处理持久化**
+
+使用 [Agent Server](/langsmith/agent-server) 时，无需手动实现或配置 Checkpointer 与 Store。服务器会在后台处理持久化基础设施。
 </Info>
 
-## Checkpointer vs. store
+## Checkpointer 与 Store 的区别
 
 | | Checkpointer | Store |
 | ---- | ---- | ---- |
-| Persists | Graph state snapshots | Application-defined key-value data |
-| Scope | A single thread | Across threads |
-| Memory type | Short-term, thread-scoped memory | Long-term, cross-thread memory |
-| Use for | Conversation continuity, human-in-the-loop, time travel, and fault tolerance | User preferences, facts, and shared knowledge |
-| Access pattern | Pass a `thread_id` in graph config | Read and write items from nodes or application code |
-| Full guide | [Checkpointers](/oss/langgraph/checkpointers) | [Stores](/oss/langgraph/stores) |
+| 持久化内容 | 图状态快照 | 应用自定义的键值数据 |
+| 作用域 | 单个线程 | 跨线程 |
+| 记忆类型 | 短期、线程范围内的记忆 | 长期、跨线程记忆 |
+| 适用场景 | 对话连续性、人在回路、时间旅行和容错 | 用户偏好、事实和共享知识 |
+| 访问方式 | 在图配置中传入 `thread_id` | 从节点或应用代码中读写条目 |
+| 完整指南 | [Checkpointer](/oss/langgraph/checkpointers) | [Store](/oss/langgraph/stores) |
 
-## Troubleshooting common issues
+## 常见问题排查
 
-### PostgresSaver: `thread_id` too long
+### PostgresSaver：`thread_id` 过长
 
-When using `PostgresSaver` (or `AsyncPostgresSaver`), the `thread_id` is stored in a column with limited length. If your `thread_id` exceeds the column size, you will see a database error.
+使用 `PostgresSaver`（或 `AsyncPostgresSaver`）时，`thread_id` 会保存在长度受限的数据库列中。如果 `thread_id` 超过列的最大长度，就会出现数据库错误。
 
-**Fix:** Keep `thread_id` values under 255 characters. Use a UUID or hash if you need deterministic IDs:
+**解决方法：** 将 `thread_id` 控制在 255 个字符以内。如果需要确定性的 ID，可以使用 UUID 或哈希：
 
 :::python
 ```python
@@ -89,20 +90,20 @@ config = {"configurable": {"thread_id": str(uuid.uuid4())[:255]}}
 ```
 :::
 
-### `MemorySaver` does not persist between restarts
+### `MemorySaver` 在重启后不会保留数据
 
-`MemorySaver` and `InMemorySaver` store checkpoints in RAM. When the process restarts, all checkpoints are lost.
+`MemorySaver` 和 `InMemorySaver` 会把检查点保存在内存（RAM）中。进程重启后，所有检查点都会丢失。
 
-**Fix:** Use a persistent checkpointer for production:
+**解决方法：** 在生产环境中使用持久化 Checkpointer：
 
-- `PostgresSaver`: PostgreSQL with async support
-- `SqliteSaver`: Local file-based storage for development
+- `PostgresSaver`：基于 PostgreSQL，支持异步操作
+- `SqliteSaver`：基于本地文件，适合开发环境
 
-### Checkpoints growing unboundedly
+### 检查点无限增长
 
-Over long conversations, checkpoints accumulate. This can increase latency and storage costs.
+在长对话中，检查点会持续累积，这可能增加延迟和存储成本。
 
-**Fix:** Prune old checkpoints periodically or set a retention policy:
+**解决方法：** 定期清理旧检查点，或设置保留策略：
 
 :::python
 ```python
@@ -114,13 +115,13 @@ checkpointer.setup()  # Creates tables with indexes
 ```
 :::
 
-### State access from parent graph to subgraph
+### 父图访问子图状态
 
-When a subgraph updates state, the parent graph may not see the changes immediately. This is because each subgraph manages its own checkpoint namespace.
+当子图更新状态后，父图可能无法立即看到这些变化。这是因为每个子图都会管理自己的 Checkpoint Namespace。
 
-**Fix:** Use [shared state via Store](/oss/langgraph/stores) for data that needs to cross graph boundaries, or configure your subgraph to write to the parent checkpoint.
+**解决方法：** 对需要跨图边界共享的数据使用[通过 Store 共享状态](/oss/langgraph/stores)，或者配置子图将数据写入父图的 Checkpoint。
 
-## Next steps
+## 下一步
 
-- [Use checkpointers](/oss/langgraph/checkpointers) to persist and inspect thread state.
-- [Use stores](/oss/langgraph/stores) to persist durable data across threads.
+- [使用 Checkpointer](/oss/langgraph/checkpointers) 持久化并检查线程状态。
+- [使用 Store](/oss/langgraph/stores) 持久化跨线程的长期数据。
