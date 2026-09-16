@@ -1,406 +1,442 @@
 ---
-title: Build a custom SQL agent
-sidebarTitle: Custom SQL agent
+title: 使用 LangGraph 构建自定义 SQL 智能体
+sidebarTitle: 自定义 SQL 智能体
+description: 使用 LangGraph 构建一个能够检查数据库 Schema、生成并校验 SQL、执行查询并根据错误自我修正的 SQL 智能体。
 ---
 
-import ChatModelTabsPy from '/snippets/chat-model-tabs.mdx';
-import ChatModelTabsJS from '/snippets/chat-model-tabs-js.mdx';
-import SqlAgentDownloadChinookPy from '/snippets/code-samples/sql-agent-download-chinook-py.mdx';
-import SqlAgentExploreDatabasePy from '/snippets/code-samples/sql-agent-explore-database-py.mdx';
-import LanggraphSqlAgentToolsPy from '/snippets/code-samples/langgraph-sql-agent-tools-py.mdx';
-import LanggraphSqlAgentDefineStepsPy from '/snippets/code-samples/langgraph-sql-agent-define-steps-py.mdx';
-import LanggraphSqlAgentAssembleAgentPy from '/snippets/code-samples/langgraph-sql-agent-assemble-agent-py.mdx';
-import LanggraphSqlAgentVisualizeGraphPy from '/snippets/code-samples/langgraph-sql-agent-visualize-graph-py.mdx';
-import LanggraphSqlAgentStreamAgentPy from '/snippets/code-samples/langgraph-sql-agent-stream-agent-py.mdx';
-import LanggraphSqlAgentHitlInterruptPy from '/snippets/code-samples/langgraph-sql-agent-hitl-interrupt-py.mdx';
-import LanggraphSqlAgentHitlAssemblePy from '/snippets/code-samples/langgraph-sql-agent-hitl-assemble-py.mdx';
-import LanggraphSqlAgentHitlStreamPy from '/snippets/code-samples/langgraph-sql-agent-hitl-stream-py.mdx';
-import LanggraphSqlAgentHitlResumePy from '/snippets/code-samples/langgraph-sql-agent-hitl-resume-py.mdx';
-import LanggraphSqlAgentDownloadChinookJs from '/snippets/code-samples/langgraph-sql-agent-download-chinook-js.mdx';
-import LanggraphSqlAgentExploreDatabaseJs from '/snippets/code-samples/langgraph-sql-agent-explore-database-js.mdx';
-import LanggraphSqlAgentToolsJs from '/snippets/code-samples/langgraph-sql-agent-tools-js.mdx';
-import LanggraphSqlAgentDefineStepsJs from '/snippets/code-samples/langgraph-sql-agent-define-steps-js.mdx';
-import LanggraphSqlAgentAssembleAgentJs from '/snippets/code-samples/langgraph-sql-agent-assemble-agent-js.mdx';
-import LanggraphSqlAgentVisualizeGraphJs from '/snippets/code-samples/langgraph-sql-agent-visualize-graph-js.mdx';
-import LanggraphSqlAgentStreamAgentJs from '/snippets/code-samples/langgraph-sql-agent-stream-agent-js.mdx';
-import LanggraphSqlAgentHitlInterruptJs from '/snippets/code-samples/langgraph-sql-agent-hitl-interrupt-js.mdx';
-import LanggraphSqlAgentHitlAssembleJs from '/snippets/code-samples/langgraph-sql-agent-hitl-assemble-js.mdx';
-import LanggraphSqlAgentHitlStreamJs from '/snippets/code-samples/langgraph-sql-agent-hitl-stream-js.mdx';
-import LanggraphSqlAgentHitlResumeJs from '/snippets/code-samples/langgraph-sql-agent-hitl-resume-js.mdx';
+本教程展示如何使用 LangGraph 构建一个自定义 **SQL 智能体**。智能体接收自然语言问题，自主检查数据库结构、生成 SQL、校验查询、执行查询，并在发生错误时根据反馈继续修正。
 
-In this tutorial we will build a custom agent that can answer questions about a SQL database using LangGraph.
+与简单的“自然语言 → SQL”单次调用不同，SQL 智能体通常需要一个循环：
 
-LangChain offers built-in [agent](/oss/langchain/agents) implementations, implemented using [LangGraph](/oss/langgraph/overview) primitives. If deeper customization is required, agents can be implemented directly in LangGraph. This guide demonstrates an example implementation of a SQL agent. For a practical introduction, see [building a SQL agent using higher-level LangChain abstractions](/oss/langchain/sql-agent).
+```text
+用户问题
+   ↓
+查看可用表
+   ↓
+读取相关 Schema
+   ↓
+生成 SQL
+   ↓
+检查 SQL
+   ↓
+执行查询
+   ├─ 成功 → 根据结果回答
+   └─ 失败 → 根据错误修正 SQL ─┐
+                               │
+                 ←─────────────┘
+```
 
 <Warning>
-Building Q&A systems of SQL databases requires executing model-generated SQL queries. There are inherent risks in doing this. Make sure that your database connection permissions are always scoped as narrowly as possible for your agent's needs. This will mitigate, though not eliminate, the risks of building a model-driven system.
+SQL 智能体能够生成数据库查询。生产环境中应使用**最小权限原则**：数据库账号只授予任务真正需要的权限，并尽可能限制为只读访问。不要让模型直接连接具有 DROP、DELETE、UPDATE 等高风险权限的生产数据库，除非你已经建立了额外的审批与安全控制。
 </Warning>
 
-The [prebuilt agent](/oss/langchain/sql-agent) lets us get started quickly, but we relied on the system prompt to constrain its behavior—for example, we instructed the agent to always start with the "list tables" tool, and to always run a query-checker tool before executing the query.
+## 前置条件
 
-We can enforce a higher degree of control in LangGraph by customizing the agent. Here, we implement a simple ReAct-agent setup, with dedicated nodes for specific tool-calls. We will use the same [state] as the prebuilt agent.
-
-### Concepts
-
-We will cover the following concepts:
-
-- [Tools](/oss/langchain/tools) for reading from SQL databases
-- The LangGraph [Graph API](/oss/langgraph/graph-api), including state, nodes, edges, and conditional edges.
-- [Human-in-the-loop](/oss/langgraph/interrupts) processes
-
-## Setup
-
-### Installation
-
-    :::python
-    <CodeGroup>
-    ```bash pip
-    pip install langchain langgraph
-    ```
-    </CodeGroup>
-    :::
-    :::js
-    <CodeGroup>
-    ```bash npm
-    npm i langchain @langchain/core @langchain/langgraph @langchain/openai sqlite3 zod
-    ```
-    ```bash yarn
-    yarn add langchain @langchain/core @langchain/langgraph @langchain/openai sqlite3 zod
-    ```
-    ```bash pnpm
-    pnpm add langchain @langchain/core @langchain/langgraph @langchain/openai sqlite3 zod
-    ```
-    </CodeGroup>
-    :::
-
-### LangSmith
-Set up [LangSmith](https://smith.langchain.com) to inspect what is happening inside your chain or agent. Then set the following environment variables:
-
-    ```shell
-    export LANGSMITH_TRACING="true"
-    export LANGSMITH_API_KEY="..."
-    ```
-
-## 1. Select an LLM
-
-Select a model that supports [tool-calling](/oss/integrations/providers/overview):
+安装 LangGraph、LangChain 以及数据库相关集成：
 
 :::python
-<ChatModelTabsPy />
+```bash
+pip install -U langgraph langchain langchain-community langchain-openai
+```
 :::
+
 :::js
-<ChatModelTabsJS />
+```bash
+npm install @langchain/langgraph @langchain/core @langchain/openai
+```
 :::
 
-The output shown in the examples below used OpenAI.
+本教程使用 SQLite 示例数据库。你也可以替换为 PostgreSQL、MySQL 或其他 LangChain 支持的 SQL 数据库。
 
-## 2. Configure the database
-
-You will be creating a [SQLite database](https://www.sqlitetutorial.net/sqlite-sample-database/) for this tutorial. SQLite is a lightweight database that is easy to set up and use. We will be loading the `chinook` database, which is a sample database that represents a digital media store.
-
-For convenience, we have hosted the database (`Chinook.db`) on a public GCS bucket.
+## 1. 连接数据库
 
 :::python
+```python
+from langchain_community.utilities import SQLDatabase
 
-<SqlAgentDownloadChinookPy />
+# Replace this URI with your own database in production.
+db = SQLDatabase.from_uri("sqlite:///Chinook.db")
 
-We will use Python's built-in `sqlite3` module to interact with the database:
-
-<SqlAgentExploreDatabasePy />
-```
-Dialect: sqlite
-Available tables: ['Album', 'Artist', 'Customer', 'Employee', 'Genre', 'Invoice', 'InvoiceLine', 'MediaType', 'Playlist', 'PlaylistTrack', 'Track']
-Sample output: [(1, 'AC/DC'), (2, 'Accept'), (3, 'Aerosmith'), (4, 'Alanis Morissette'), (5, 'Alice In Chains')]
-```
-:::
-:::js
-
-<LanggraphSqlAgentDownloadChinookJs />
-
-We will use the `sqlite3` library to interact with the database:
-
-<LanggraphSqlAgentExploreDatabaseJs />
-```
-Dialect: sqlite
-Available tables: Album, Artist, Customer, Employee, Genre, Invoice, InvoiceLine, MediaType, Playlist, PlaylistTrack, Track
-Sample output: [{"ArtistId":1,"Name":"AC/DC"},{"ArtistId":2,"Name":"Accept"},{"ArtistId":3,"Name":"Aerosmith"},{"ArtistId":4,"Name":"Alanis Morissette"},{"ArtistId":5,"Name":"Alice In Chains"}]
+print(db.get_usable_table_names())
 ```
 :::
 
-## 3. Add tools for database interactions
+连接成功后，首先应该让智能体能够发现数据库中有哪些表，而不是直接让模型猜测 Schema。
 
-<Warning>
-The following database tools are minimal wrappers for demonstration purposes only. They are not intended to be secure or used in production. Use narrowly scoped database permissions and add application-specific validation before executing model-generated SQL.
-</Warning>
+## 2. 定义 SQL 工具
+
+SQL Agent 通常至少需要以下能力：
+
+1. **列出表**：知道数据库中有哪些可用实体。
+2. **查看 Schema**：读取候选表的字段、类型和部分样例。
+3. **执行查询**：执行最终 SQL 并获得结果。
+4. **检查查询**：在执行前让模型检查常见 SQL 错误。
 
 :::python
-We can implement database [tools](/oss/langchain/tools) as thin wrappers using the `@tool` decorator from `langchain.tools`:
-
-<LanggraphSqlAgentToolsPy />
-```
-sql_db_list_tables: Input is an empty string, output is a comma-separated list of tables in the database.
-
-sql_db_schema: Input to this tool is a comma-separated list of tables, output is the schema and sample rows for those tables.
-    Be sure that the tables actually exist by calling sql_db_list_tables first!
-    Example Input: table1, table2, table3
-
-sql_db_query: Input to this tool is a detailed and correct SQL query, output is a result from the database.
-    If the query is not correct, an error message will be returned.
-    If an error is returned, rewrite the query, check the query, and try again.
-    If you encounter an issue with Unknown column 'xxxx' in 'field list', use sql_db_schema to query the correct table fields.
-```
-:::
-:::js
-We'll create custom tools to interact with the database:
-
-<LanggraphSqlAgentToolsJs />
-```
-sql_db_list_tables: Input is an empty string, output is a comma-separated list of tables in the database.
-
-sql_db_schema: Input to this tool is a comma-separated list of tables, output is the schema and sample rows for those tables. Be sure that the tables actually exist by calling sql_db_list_tables first! Example Input: table1, table2, table3
-
-sql_db_query: Input to this tool is a detailed and correct SQL query, output is a result from the database. If the query is not correct, an error message will be returned. If an error is returned, rewrite the query, check the query, and try again.
-```
-:::
-
-## 4. Define application steps
-
-We construct dedicated nodes for the following steps:
-
-- Listing DB tables
-- Calling the "get schema" tool
-- Generating a query
-- Checking the query
-
-Putting these steps in dedicated nodes lets us (1) force tool-calls when needed, and (2) customize the prompts associated with each step.
-
-:::python
-
-<LanggraphSqlAgentDefineStepsPy />
-
-:::
-:::js
-
-<LanggraphSqlAgentDefineStepsJs />
-
-:::
-
-## 5. Implement the agent
-
-We can now assemble these steps into a workflow using the [Graph API](/oss/langgraph/graph-api). We define a [conditional edge](/oss/langgraph/graph-api#conditional-edges) at the query generation step that will route to the query checker if a query is generated, or end if there are no tool calls present, such that the LLM has delivered a response to the query.
-
-:::python
-
-<LanggraphSqlAgentAssembleAgentPy />
-
-We visualize the application below:
-
-<LanggraphSqlAgentVisualizeGraphPy />
-
-:::
-:::js
-
-<LanggraphSqlAgentAssembleAgentJs />
-
-We visualize the application below:
-
-<LanggraphSqlAgentVisualizeGraphJs />
-
-:::
-<img
-  src="/oss/images/sql-agent-langgraph.png"
-  alt="SQL agent graph"
-  style={{ height: "800px" }}
-/>
-
-We can now invoke the graph:
-:::python
-
-<LanggraphSqlAgentStreamAgentPy />
-
-:::
-:::js
-
-<LanggraphSqlAgentStreamAgentJs />
-
-:::
-```
-================================ Human Message =================================
-
-Which genre on average has the longest tracks?
-================================== Ai Message ==================================
-
-Available tables: Album, Artist, Customer, Employee, Genre, Invoice, InvoiceLine, MediaType, Playlist, PlaylistTrack, Track
-================================== Ai Message ==================================
-Tool Calls:
-  sql_db_schema (call_yzje0tj7JK3TEzDx4QnRR3lL)
- Call ID: call_yzje0tj7JK3TEzDx4QnRR3lL
-  Args:
-    table_names: Genre, Track
-================================= Tool Message =================================
-Name: sql_db_schema
-
-
-CREATE TABLE "Genre" (
-	"GenreId" INTEGER NOT NULL,
-	"Name" NVARCHAR(120),
-	PRIMARY KEY ("GenreId")
+```python
+from langchain_community.tools.sql_database.tool import (
+    InfoSQLDatabaseTool,
+    ListSQLDatabaseTool,
+    QuerySQLCheckerTool,
+    QuerySQLDatabaseTool,
 )
+from langchain.chat_models import init_chat_model
 
-/*
-3 rows from Genre table:
-GenreId	Name
-1	Rock
-2	Jazz
-3	Metal
-*/
+model = init_chat_model("openai:gpt-5.4-mini")
 
-
-CREATE TABLE "Track" (
-	"TrackId" INTEGER NOT NULL,
-	"Name" NVARCHAR(200) NOT NULL,
-	"AlbumId" INTEGER,
-	"MediaTypeId" INTEGER NOT NULL,
-	"GenreId" INTEGER,
-	"Composer" NVARCHAR(220),
-	"Milliseconds" INTEGER NOT NULL,
-	"Bytes" INTEGER,
-	"UnitPrice" NUMERIC(10, 2) NOT NULL,
-	PRIMARY KEY ("TrackId"),
-	FOREIGN KEY("MediaTypeId") REFERENCES "MediaType" ("MediaTypeId"),
-	FOREIGN KEY("GenreId") REFERENCES "Genre" ("GenreId"),
-	FOREIGN KEY("AlbumId") REFERENCES "Album" ("AlbumId")
-)
-
-/*
-3 rows from Track table:
-TrackId	Name	AlbumId	MediaTypeId	GenreId	Composer	Milliseconds	Bytes	UnitPrice
-1	For Those About To Rock (We Salute You)	1	1	1	Angus Young, Malcolm Young, Brian Johnson	343719	11170334	0.99
-2	Balls to the Wall	2	2	1	U. Dirkschneider, W. Hoffmann, H. Frank, P. Baltes, S. Kaufmann, G. Hoffmann	342562	5510424	0.99
-3	Fast As a Shark	3	2	1	F. Baltes, S. Kaufman, U. Dirkscneider & W. Hoffman	230619	3990994	0.99
-*/
-================================== Ai Message ==================================
-Tool Calls:
-  sql_db_query (call_cb9ApLfZLSq7CWg6jd0im90b)
- Call ID: call_cb9ApLfZLSq7CWg6jd0im90b
-  Args:
-    query: SELECT Genre.Name, AVG(Track.Milliseconds) AS AvgMilliseconds FROM Track JOIN Genre ON Track.GenreId = Genre.GenreId GROUP BY Genre.GenreId ORDER BY AvgMilliseconds DESC LIMIT 5;
-================================== Ai Message ==================================
-Tool Calls:
-  sql_db_query (call_DMVALfnQ4kJsuF3Yl6jxbeAU)
- Call ID: call_DMVALfnQ4kJsuF3Yl6jxbeAU
-  Args:
-    query: SELECT Genre.Name, AVG(Track.Milliseconds) AS AvgMilliseconds FROM Track JOIN Genre ON Track.GenreId = Genre.GenreId GROUP BY Genre.GenreId ORDER BY AvgMilliseconds DESC LIMIT 5;
-================================= Tool Message =================================
-Name: sql_db_query
-
-[('Sci Fi & Fantasy', 2911783.0384615385), ('Science Fiction', 2625549.076923077), ('Drama', 2575283.78125), ('TV Shows', 2145041.0215053763), ('Comedy', 1585263.705882353)]
-================================== Ai Message ==================================
-
-The genre with the longest tracks on average is "Sci Fi & Fantasy," with an average track length of approximately 2,911,783 milliseconds. Other genres with relatively long tracks include "Science Fiction," "Drama," "TV Shows," and "Comedy."
+list_tables_tool = ListSQLDatabaseTool(db=db)
+get_schema_tool = InfoSQLDatabaseTool(db=db)
+run_query_tool = QuerySQLDatabaseTool(db=db)
+check_query_tool = QuerySQLCheckerTool(db=db, llm=model)
 ```
-:::python
-<Tip>
-See [LangSmith trace](https://smith.langchain.com/public/94b8c9ac-12f7-4692-8706-836a1f30f1ea/r) for the above run.
-</Tip>
-:::
-:::js
-<Tip>
-See [LangSmith trace](https://smith.langchain.com/public/a6a96896-686a-4040-b9b5-28d701453d6f/r) for the above run.
-</Tip>
 :::
 
-## 6. Implement human-in-the-loop review
+工具描述非常重要。模型会根据 Tool Name、Description 和 Input Schema 决定何时以及如何调用工具。
 
-It can be prudent to check the agent's SQL queries before they are executed for any unintended actions or inefficiencies.
+## 3. 定义 State
 
-Here we leverage LangGraph's [human-in-the-loop](/oss/langgraph/interrupts) features to pause the run before executing a SQL query and wait for human review. Using LangGraph's [persistence layer](/oss/langgraph/persistence), we can pause the run indefinitely (or at least as long as the persistence layer is alive).
-
-Let's wrap the `sql_db_query` tool in a node that receives human input. We can implement this using the [interrupt](/oss/langgraph/interrupts) function. Below, we allow for input to approve the tool call, edit its arguments, or provide user feedback.
+SQL Agent 的核心状态通常就是消息历史。使用 `MessagesState` 可以自动获得适合消息列表的 Reducer。
 
 :::python
+```python
+from langgraph.graph import MessagesState
 
-<LanggraphSqlAgentHitlInterruptPy />
-
+class State(MessagesState):
+    pass
+```
 :::
+
 :::js
+```typescript
+import { StateSchema, MessagesValue } from "@langchain/langgraph";
 
-<LanggraphSqlAgentHitlInterruptJs />
-
+const State = new StateSchema({
+  messages: MessagesValue,
+});
+```
 :::
 
-<Note>
-The above implementation follows the [tool interrupt example](/oss/langgraph/interrupts#interrupts-in-tools) in the broader [human-in-the-loop](/oss/langgraph/interrupts) guide. Refer to that guide for details and alternatives.
-</Note>
+如果还需要保存 SQL 审批状态、数据库租户、查询预算等额外信息，可以继续向 State 中添加字段。
 
-Let's now re-assemble our graph. We will replace the programmatic check with human review. Note that we now include a [checkpointer](/oss/langgraph/persistence); this is required to pause and resume the run.
+## 4. 列出数据库表
+
+第一步让 Agent 查看可用表。这一步可以确定性执行，而不是让模型决定是否调用。
 
 :::python
+```python
+from langchain.messages import AIMessage
 
-<LanggraphSqlAgentHitlAssemblePy />
 
+def list_tables(state: State):
+    tool_call = {
+        "name": list_tables_tool.name,
+        "args": {},
+        "id": "list_tables",
+        "type": "tool_call",
+    }
+    tool_message = list_tables_tool.invoke(tool_call)
+    return {
+        "messages": [
+            AIMessage(content="", tool_calls=[tool_call]),
+            tool_message,
+        ]
+    }
+```
 :::
-:::js
 
-<LanggraphSqlAgentHitlAssembleJs />
+在真实系统中，这种“必须执行”的步骤很适合写成确定性 Node。不要把所有控制权都交给 LLM。
 
-:::
+## 5. 选择并读取相关 Schema
 
-We can invoke the graph as before. This time, execution is interrupted:
+看到表列表后，让模型判断哪些表可能与问题相关，并调用 Schema Tool。
 
 :::python
+```python
+model_with_schema_tool = model.bind_tools([get_schema_tool])
 
-<LanggraphSqlAgentHitlStreamPy />
 
-:::
-:::js
-
-<LanggraphSqlAgentHitlStreamJs />
-
-:::
-
+def call_get_schema(state: State):
+    response = model_with_schema_tool.invoke(state["messages"])
+    return {"messages": [response]}
 ```
-...
+:::
 
-INTERRUPTED:
-{
-  "action": "sql_db_query",
-  "args": {
-    "query": "SELECT Genre.Name, AVG(Track.Milliseconds) AS AvgLength FROM Track JOIN Genre ON Track.GenreId = Genre.GenreId GROUP BY Genre.Name ORDER BY AvgLength DESC LIMIT 5;"
-  },
-  "description": "Please review the tool call"
-}
-```
-We can accept or edit the tool call using [Command](/oss/langgraph/use-graph-api#combine-control-flow-and-state-updates-with-command):
+然后使用预构建的 `ToolNode` 执行模型产生的 Tool Call：
 
 :::python
+```python
+from langgraph.prebuilt import ToolNode
 
-<LanggraphSqlAgentHitlResumePy />
-
-:::
-:::js
-
-<LanggraphSqlAgentHitlResumeJs />
-
+get_schema_node = ToolNode([get_schema_tool], name="get_schema")
+```
 :::
 
+这样，模型负责**选择哪些表**，LangGraph Runtime 负责真正执行 Tool。
+
+## 6. 生成 SQL 查询
+
+Schema 已经进入消息上下文后，可以让模型生成 SQL。
+
+一个可靠的 Prompt 应明确：
+
+- 只生成合法 SQL；
+- 不查询不相关字段；
+- 默认限制返回行数；
+- 不执行 DML / DDL 等写操作；
+- 遇到错误时根据 Error Message 修正；
+- 在真正回答用户前必须基于 Tool Result，而不是猜测结果。
+
+:::python
+```python
+query_prompt = """
+You are a SQL expert. Given the conversation and database schema,
+write a syntactically correct SQL query that answers the user's question.
+
+Rules:
+- Do not make any DML statements (INSERT, UPDATE, DELETE, DROP, etc.).
+- Unless the user asks for a specific number of examples, limit results.
+- Only select columns relevant to the question.
+- Never invent table or column names.
+- Use the database schema and tool errors to repair mistakes.
+"""
+
+model_with_query_tool = model.bind_tools([run_query_tool])
+
+
+def generate_query(state: State):
+    response = model_with_query_tool.invoke(
+        [{"role": "system", "content": query_prompt}] + state["messages"]
+    )
+    return {"messages": [response]}
 ```
-================================== Ai Message ==================================
-Tool Calls:
-  sql_db_query (call_t4yXkD6shwdTPuelXEmY3sAY)
- Call ID: call_t4yXkD6shwdTPuelXEmY3sAY
-  Args:
-    query: SELECT Genre.Name, AVG(Track.Milliseconds) AS AvgLength FROM Track JOIN Genre ON Track.GenreId = Genre.GenreId GROUP BY Genre.Name ORDER BY AvgLength DESC LIMIT 5;
-================================= Tool Message =================================
-Name: sql_db_query
+:::
 
-[('Sci Fi & Fantasy', 2911783.0384615385), ('Science Fiction', 2625549.076923077), ('Drama', 2575283.78125), ('TV Shows', 2145041.0215053763), ('Comedy', 1585263.705882353)]
-================================== Ai Message ==================================
+这里可以直接绑定执行 Tool，也可以将“生成 SQL”和“真正执行 SQL”拆开，以便在中间加入 Query Checker 或人工审批。
 
-The genre with the longest average track length is "Sci Fi & Fantasy" with an average length of about 2,911,783 milliseconds. Other genres with long average track lengths include "Science Fiction," "Drama," "TV Shows," and "Comedy."
+## 7. 在执行前检查 SQL
+
+生产级 SQL Agent 最好不要直接执行模型第一次生成的 SQL。可以额外加入 Query Checker：
+
+:::python
+```python
+from langchain.messages import AIMessage
+
+
+def check_query(state: State):
+    last_message = state["messages"][-1]
+    tool_call = last_message.tool_calls[0]
+    query = tool_call["args"]["query"]
+
+    checked_query = check_query_tool.invoke({"query": query})
+
+    checked_call = {
+        "name": run_query_tool.name,
+        "args": {"query": checked_query},
+        "id": tool_call["id"],
+        "type": "tool_call",
+    }
+    return {"messages": [AIMessage(content="", tool_calls=[checked_call])]}
+```
+:::
+
+Query Checker 可以发现很多常见问题，例如：
+
+- `NOT IN` 与 `NULL` 组合造成的逻辑错误；
+- `UNION` 与 `UNION ALL` 误用；
+- 数据类型不匹配；
+- 错误的 Join Column；
+- 函数参数数量错误；
+- 不必要的复杂查询。
+
+它不是数据库安全边界。真正的安全仍然应该通过数据库权限、Allowlist、Query Parser、Policy Check 和人工审批实现。
+
+## 8. 执行 SQL
+
+使用 `ToolNode` 执行检查后的查询：
+
+:::python
+```python
+run_query_node = ToolNode([run_query_tool], name="run_query")
+```
+:::
+
+如果 SQL 执行失败，Tool Result 会包含 Error Message。随后把控制流交回模型，让它基于错误修正 Query。
+
+这正是 Agent Loop 的价值：
+
+```text
+错误 SQL
+  ↓
+数据库返回错误
+  ↓
+错误进入消息上下文
+  ↓
+LLM 修正 SQL
+  ↓
+重新检查并执行
 ```
 
-Refer to the [human-in-the-loop guide](/oss/langgraph/interrupts) for details.
+## 9. 根据查询结果回答用户
 
-## Next steps
-Check out the [Evaluate a graph](/langsmith/evaluate-graph) guide for evaluating LangGraph applications, including SQL agents like this one, using LangSmith.
+查询成功后，不应该直接把原始数据库输出作为最终回答。让模型根据查询结果生成用户可读的解释：
+
+:::python
+```python
+
+def generate_answer(state: State):
+    response = model.invoke(
+        [
+            {
+                "role": "system",
+                "content": (
+                    "Answer the user's question using the SQL query result. "
+                    "Do not invent facts not present in the result."
+                ),
+            }
+        ]
+        + state["messages"]
+    )
+    return {"messages": [response]}
+```
+:::
+
+## 10. 组装 Graph
+
+最终 Graph 可以组织为：
+
+```text
+START
+  ↓
+list_tables
+  ↓
+call_get_schema
+  ↓
+get_schema
+  ↓
+generate_query
+  ↓
+check_query
+  ↓
+run_query
+  ↓
+成功？
+ ├─ 否 → generate_query
+ └─ 是 → generate_answer → END
+```
+
+:::python
+```python
+from langgraph.graph import StateGraph, START, END
+
+builder = StateGraph(State)
+
+builder.add_node("list_tables", list_tables)
+builder.add_node("call_get_schema", call_get_schema)
+builder.add_node("get_schema", get_schema_node)
+builder.add_node("generate_query", generate_query)
+builder.add_node("check_query", check_query)
+builder.add_node("run_query", run_query_node)
+builder.add_node("generate_answer", generate_answer)
+
+builder.add_edge(START, "list_tables")
+builder.add_edge("list_tables", "call_get_schema")
+builder.add_edge("call_get_schema", "get_schema")
+builder.add_edge("get_schema", "generate_query")
+builder.add_edge("generate_query", "check_query")
+builder.add_edge("check_query", "run_query")
+
+# In a complete implementation, route based on the tool result:
+# errors -> generate_query, successful results -> generate_answer.
+
+builder.add_edge("run_query", "generate_answer")
+builder.add_edge("generate_answer", END)
+
+graph = builder.compile()
+```
+:::
+
+实际实现中，应通过 Conditional Edge 判断 Tool Result 是否是 Error；如果是，返回 `generate_query` 进行修复，否则进入 `generate_answer`。
+
+## 11. 运行智能体
+
+:::python
+```python
+question = "Which genre has the most tracks?"
+
+for chunk in graph.stream(
+    {"messages": [{"role": "user", "content": question}]},
+    stream_mode="updates",
+):
+    print(chunk)
+```
+:::
+
+如果希望逐 Token 展示模型输出，可以使用 `messages` Stream Mode，或者使用更高层的 [Event Streaming](/oss/langgraph/event-streaming)。
+
+## 加入人工审批
+
+SQL 查询即使是只读操作，也可能代价非常高，例如扫描整张大表。对于生产环境，可以在执行前增加 [`interrupt()`](/oss/langgraph/interrupts)：
+
+:::python
+```python
+from langgraph.types import interrupt
+
+
+def approve_query(state: State):
+    last_message = state["messages"][-1]
+    query = last_message.tool_calls[0]["args"]["query"]
+
+    decision = interrupt({
+        "action": "execute_sql",
+        "query": query,
+        "message": "Approve this SQL query?",
+    })
+
+    if not decision:
+        raise ValueError("Query rejected by reviewer")
+
+    return {}
+```
+:::
+
+更成熟的系统可以让人工：
+
+- 批准查询；
+- 修改 SQL 后继续；
+- 拒绝查询；
+- 要求 Agent 重新规划。
+
+## 生产环境安全建议
+
+SQL Agent 的安全不能只靠 Prompt。建议把控制分成多个层次：
+
+1. **数据库权限**：使用只读、最小权限账号。
+2. **数据库隔离**：不要直接暴露生产主库；优先使用 Replica / Analytics Warehouse。
+3. **SQL Parser / AST Policy**：在执行前拒绝 DML、DDL、多语句查询和危险函数。
+4. **资源限制**：设置 Statement Timeout、Row Limit、扫描预算和并发限制。
+5. **Schema Allowlist**：只向 Agent 暴露允许访问的表和字段。
+6. **人工审批**：高成本或敏感查询使用 Interrupt。
+7. **审计与 Tracing**：记录用户问题、生成 SQL、Tool Result 和最终回答。
+
+## 为什么用 LangGraph，而不是简单 Agent Loop
+
+最小 SQL Agent 可以用一个 Tool-calling Loop 实现，但 LangGraph 让每个重要阶段拥有明确边界：
+
+- Schema Discovery 可以确定性执行；
+- SQL Generation 与 SQL Execution 可以分离；
+- Query Check 可以成为强制步骤；
+- Error Recovery 可以显式循环；
+- 高风险查询可以 Interrupt；
+- 长时间查询可以配置 Timeout / Retry；
+- Checkpoint 可以让失败后的长流程从中间恢复；
+- LangSmith 可以观察每一步 State 和 Tool Call。
+
+因此，LangGraph 特别适合“**模型负责部分决策，但系统必须保持强控制和可审计性**”的数据库智能体。
+
+## 下一步
+
+- [Graph API](/oss/langgraph/graph-api)：了解 Node、Edge、State 和 Conditional Edge。
+- [中断](/oss/langgraph/interrupts)：在查询执行前加入人工审批。
+- [容错](/oss/langgraph/fault-tolerance)：处理数据库 Timeout、Retry 和 Error Handler。
+- [流式输出](/oss/langgraph/streaming)：向前端实时展示 Agent 执行过程。
+- [LangSmith 可观测性](/oss/langgraph/observability)：追踪 SQL Agent 的每个执行步骤。
