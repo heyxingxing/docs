@@ -1,32 +1,32 @@
 ---
-title: Use time-travel
-sidebarTitle: Time travel
-description: Replay past executions and fork to explore alternative paths in LangGraph
+title: 使用时间旅行
+sidebarTitle: 时间旅行
+description: 在 LangGraph 中重放过去的执行，并从历史状态分叉以探索不同路径
 ---
 
-## Overview
+## 概览
 
-LangGraph supports time travel through [checkpoints](/oss/langgraph/checkpointers#checkpoints):
+LangGraph 通过[检查点（Checkpoint）](/oss/langgraph/checkpointers#checkpoints)支持时间旅行：
 
-- **[Replay](#replay)**: Retry from a prior checkpoint.
-- **[Fork](#fork)**: Branch from a prior checkpoint with modified state to explore an alternative path.
+- **[Replay（重放）](#replay)**：从之前的 Checkpoint 重新执行。
+- **[Fork（分叉）](#fork)**：从之前的 Checkpoint 出发，修改 State 后创建新的执行分支，以探索另一条路径。
 
-Both work by resuming from a prior checkpoint. Nodes before the checkpoint are not re-executed (results are already saved). Nodes after the checkpoint re-execute, including any LLM calls, API requests, and [interrupts](/oss/langgraph/interrupts) (which may produce different results).
+二者本质上都是从历史 Checkpoint 恢复执行。Checkpoint 之前的节点不会重新执行，因为它们的结果已经保存；Checkpoint 之后的节点会重新执行，包括所有 LLM 调用、API 请求和[中断](/oss/langgraph/interrupts)，因此新的执行结果可能与之前不同。
 
 ## Replay
 
-Invoke the graph with a prior checkpoint's config to replay from that point.
+使用历史 Checkpoint 的 Config 调用图，即可从该位置开始重放。
 
 <Warning>
 
-Replay re-executes nodes—it doesn't just read from cache. LLM calls, API requests, and [interrupts](/oss/langgraph/interrupts) fire again and may return different results. Replaying from the final checkpoint (no `next` nodes) is a no-op.
+Replay 会真正重新执行节点，而不是简单读取缓存。LLM 调用、API 请求和[中断](/oss/langgraph/interrupts)都会再次触发，因此可能返回不同结果。如果从最终 Checkpoint 开始重放（没有任何 `next` 节点），则不会执行任何操作。
 
 </Warning>
 
 ![Replay](/oss/images/re_play.png)
 
 :::python
-Use @[`get_state_history`] to find the checkpoint you want to replay from, then call @[`invoke`][CompiledStateGraph.invoke] with that checkpoint's config:
+使用 @[`get_state_history`] 找到希望重放的 Checkpoint，然后使用该 Checkpoint 的 Config 调用 @[`invoke`][CompiledStateGraph.invoke]：
 
 ```python
 from langgraph.graph import StateGraph, START
@@ -76,7 +76,7 @@ replay_result = graph.invoke(None, before_joke.config)
 :::
 
 :::js
-Use @[`getStateHistory`] to find the checkpoint you want to replay from, then call @[`invoke`][CompiledStateGraph.invoke] with that checkpoint's config:
+使用 @[`getStateHistory`] 找到希望重放的 Checkpoint，然后使用该 Checkpoint 的 Config 调用 @[`invoke`][CompiledStateGraph.invoke]：
 
 ```typescript
 import { v7 as uuid7 } from "uuid";
@@ -122,13 +122,13 @@ const replayResult = await graph.invoke(null, beforeJoke.config);
 
 ## Fork
 
-Fork creates a new branch from a past checkpoint with modified state. Call @[`update_state`] on a prior checkpoint to create the fork, then @[`invoke`][CompiledStateGraph.invoke] with `None` to continue execution.
+Fork 会从过去的 Checkpoint 创建一条新的执行分支，并允许你修改 State。先在历史 Checkpoint 上调用 @[`update_state`] 创建 Fork，然后以 `None` 作为输入调用 @[`invoke`][CompiledStateGraph.invoke] 继续执行。
 
 ![Fork](/oss/images/checkpoints_full_story.jpg)
 
 <Warning>
 
-`update_state` does **not** roll back a thread. It creates a new checkpoint that branches from the specified point. The original execution history remains intact.
+`update_state` **不会**把线程整体回滚到过去。它是在指定历史位置上创建一个新的 Checkpoint 分支，原始执行历史仍然完整保留。
 
 </Warning>
 
@@ -171,17 +171,17 @@ console.log(forkResult.joke); // A joke about chickens, not socks
 ```
 :::
 
-### From a specific node
+### 从指定节点开始
 
-When you call @[`update_state`], values are applied using the specified node's writers (including [reducers](/oss/langgraph/graph-api#reducers)). The checkpoint records that node as having produced the update, and execution resumes from that node's successors.
+调用 @[`update_state`] 时，传入的值会使用指定节点的 Writer 进行更新，其中也包括 [Reducer](/oss/langgraph/graph-api#reducers)。新的 Checkpoint 会记录“该更新由哪个节点产生”，后续执行则从该节点的 Successor 开始继续。
 
-By default, LangGraph infers `as_node` from the checkpoint's version history. When forking from a specific checkpoint, this inference is almost always correct.
+默认情况下，LangGraph 会根据 Checkpoint 的版本历史推断 `as_node`。当你从某个明确的历史 Checkpoint 创建 Fork 时，这个推断通常是正确的。
 
-Specify `as_node` explicitly when:
+以下情况下，应显式指定 `as_node`：
 
-- **Parallel branches**: Multiple nodes updated state in the same step, and LangGraph can't determine which was last (`InvalidUpdateError`).
-- **No execution history**: Setting up state on a fresh thread (common in [testing](/oss/langgraph/test)).
-- **Skipping nodes**: Set `as_node` to a later node to make the graph think that node already ran.
+- **并行分支**：同一个 Step 中有多个节点更新了 State，LangGraph 无法判断最后一个节点是谁，此时会出现 `InvalidUpdateError`。
+- **没有执行历史**：在一个全新 Thread 上直接设置 State，这在[测试](/oss/langgraph/test)中很常见。
+- **跳过节点**：将 `as_node` 设置为更靠后的节点，让图把这次 State Update 当作该节点已经执行过。
 
 :::python
 ```python
@@ -211,9 +211,9 @@ const forkConfig = await graph.updateState(
 ```
 :::
 
-## Interrupts
+## Interrupt
 
-If your graph uses @[`interrupt`] for [human-in-the-loop](/oss/langgraph/interrupts) workflows, interrupts are always re-triggered during time travel. The node containing the interrupt re-executes, and `interrupt()` pauses for a new `Command(resume=...)`.
+如果图使用 @[`interrupt`] 构建[人在回路](/oss/langgraph/interrupts)工作流，那么在时间旅行过程中 Interrupt 总会再次触发。包含 Interrupt 的节点会重新执行，`interrupt()` 会再次暂停，等待新的 `Command(resume=...)`。
 
 :::python
 ```python
@@ -304,9 +304,9 @@ await graph.invoke(new Command({ resume: "Bob" }), forkConfig);
 ```
 :::
 
-### Multiple interrupts
+### 多个 Interrupt
 
-If your graph collects input at several points (for example, a multi-step form), you can fork from between the interrupts to change a later answer without re-asking earlier questions.
+如果图会在多个位置收集用户输入，例如多步骤表单，那么可以从两个 Interrupt 之间创建 Fork。这样可以修改后面的回答，而不用重新询问前面已经回答的问题。
 
 :::python
 ```python
@@ -348,16 +348,16 @@ const result = await graph.invoke(null, forkConfig);
 ```
 :::
 
-## Subgraphs
+## 子图
 
-Time travel with [subgraphs](/oss/langgraph/use-subgraphs) depends on whether the subgraph has its own checkpointer. This determines the granularity of checkpoints you can time travel from.
+对子图进行[时间旅行](/oss/langgraph/use-subgraphs)时，行为取决于子图是否拥有自己的 Checkpointer。这会决定你能够从多细的 Checkpoint 粒度进行时间旅行。
 
 <Tabs>
-<Tab title="Inherited checkpointer (default)">
+<Tab title="继承父图 Checkpointer（默认）">
 
-By default, a subgraph inherits the parent's checkpointer. The parent treats the entire subgraph as a **single super-step** — there is only one parent-level checkpoint for the whole subgraph execution. Time traveling from before the subgraph re-executes it from scratch.
+默认情况下，子图会继承父图的 Checkpointer。父图会把整个子图视为**一个 Super-step**，因此整个子图执行过程在父图层面只有一个 Checkpoint。从子图开始前进行时间旅行，会让整个子图从头重新执行。
 
-You cannot time travel to a point *between* nodes in a default subgraph — you can only time travel from the parent level.
+对于默认子图，你不能从子图内部两个节点之间的位置进行时间旅行；只能从父图层面的 Checkpoint 开始。
 
 :::python
 ```python
@@ -431,11 +431,11 @@ const result = await graph.invoke(null, forkConfig);
 :::
 
 </Tab>
-<Tab title="Subgraph checkpointer">
+<Tab title="子图自己的 Checkpointer">
 
-Set `checkpointer=True` on the subgraph to give it its own checkpoint history. This creates checkpoints at each step **within** the subgraph, allowing you to time travel from a specific point inside it — for example, between two interrupts.
+在子图上设置 `checkpointer=True`，可以让它拥有独立的 Checkpoint 历史。这样子图内部的每个 Step 都会创建 Checkpoint，因此你能够从子图内部的特定位置开始时间旅行，例如从两个 Interrupt 之间开始。
 
-Use @[`get_state`] with `subgraphs=True` to access the subgraph's own checkpoint config, then fork from it:
+使用 @[`get_state`] 并设置 `subgraphs=True` 来获得子图自身的 Checkpoint Config，然后从该位置创建 Fork：
 
 :::python
 ```python
@@ -508,4 +508,4 @@ const result = await graph.invoke(null, forkConfig);
 </Tab>
 </Tabs>
 
-See [subgraph persistence](/oss/langgraph/use-subgraphs#subgraph-persistence) for more on configuring subgraph checkpointers.
+关于配置子图 Checkpointer 的更多信息，请参阅[子图持久化](/oss/langgraph/use-subgraphs#subgraph-persistence)。
