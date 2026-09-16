@@ -1,0 +1,82 @@
+---
+title: 安装 LangGraph
+sidebarTitle: 安装
+---
+
+安装 LangGraph 基础包：
+
+:::python
+<CodeGroup>
+```bash pip
+pip install -U langgraph
+```
+
+```bash uv
+uv add langgraph
+```
+</CodeGroup>
+:::
+
+:::js
+<CodeGroup>
+```bash npm
+npm install @langchain/langgraph @langchain/core
+```
+
+```bash pnpm
+pnpm add @langchain/langgraph @langchain/core
+```
+
+```bash yarn
+yarn add @langchain/langgraph @langchain/core
+```
+
+```bash bun
+bun add @langchain/langgraph @langchain/core
+```
+</CodeGroup>
+:::
+
+使用 LangGraph 时，你通常还需要访问 LLM 并定义工具。具体采用什么方式完全由你决定。
+
+本文档中会使用的一种方式，是通过 [LangChain](/oss/langchain/overview) 来完成这些工作。
+
+安装 LangChain：
+
+:::python
+<CodeGroup>
+```bash pip
+pip install -U langchain
+# Requires Python 3.10+
+```
+
+```bash uv
+uv add langchain
+# Requires Python 3.10+
+```
+</CodeGroup>
+:::
+
+:::js
+<CodeGroup>
+```bash npm
+npm install langchain
+```
+
+```bash pnpm
+pnpm add langchain
+```
+
+```bash yarn
+yarn add langchain
+```
+
+```bash bun
+bun add langchain
+```
+</CodeGroup>
+:::
+
+如果要使用特定 LLM 提供商对应的包，需要单独安装。
+
+各提供商的具体安装方式，请参考 [integrations](/oss/integrations/providers/overview) 页面。
