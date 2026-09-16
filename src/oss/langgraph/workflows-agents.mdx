@@ -1,2266 +1,510 @@
 ---
-title: Workflows and agents
-sidebarTitle: Workflows + agents
+title: 工作流与智能体
+sidebarTitle: 工作流与智能体
+description: 使用 LangGraph 构建常见的工作流与智能体模式，包括 Prompt Chaining、并行化、路由、Orchestrator-Worker、Evaluator-Optimizer 与 Agent Loop。
 ---
 
-import WorkflowsAgentsToolRuntimeStateContextPy from "/snippets/code-samples/workflows-agents-tool-runtime-state-context-py.mdx";
-import WorkflowsAgentsToolRuntimeStateContextJs from "/snippets/code-samples/workflows-agents-tool-runtime-state-context-js.mdx";
+LangGraph 可以同时构建**工作流（Workflow）**和**智能体（Agent）**，但二者在控制流上有一个关键区别：
 
-This guide reviews common workflow and agent patterns.
+- **工作流**拥有预先定义好的代码路径，LLM 和工具会按照固定结构执行。
+- **智能体**的控制流是动态的：模型根据当前上下文决定下一步做什么、调用什么工具、什么时候结束。
 
-- Workflows have predetermined code paths and are designed to operate in a certain order.
-- Agents are dynamic and define their own processes and tool usage.
+现实系统通常会混合两者：关键业务约束由确定性工作流控制，而信息检索、规划、工具选择等步骤交给 Agent 动态决策。
 
-![Agent Workflow](/oss/images/agent_workflow.png)
+## 配置模型
 
-LangGraph offers several benefits when building agents and workflows, including [persistence](/oss/langgraph/persistence), [streaming](/oss/langgraph/streaming), and support for debugging as well as [deployment](/oss/langgraph/deploy).
-
-<Tip>
-Trace and compare these workflow patterns with [LangSmith](https://smith.langchain.com). Follow the [tracing quickstart](/langsmith/trace-with-langgraph) to see how data flows through each step. We recommend you also set up [LangSmith Engine](/langsmith/engine) which monitors your traces, detects issues, and proposes fixes.
-</Tip>
-
-## Setup
-
-To build a workflow or agent, you can use [any chat model](/oss/integrations/chat) that supports structured outputs and tool calling. The following example uses Anthropic:
+下面的示例使用 LangChain 的统一模型接口。你可以替换为自己使用的 Provider。
 
 :::python
-1. Install dependencies:
-```bash
-pip install langchain_core langchain-anthropic langgraph
-```
-
-2. Initialize the LLM:
-
 ```python
-import os
-import getpass
+from langchain.chat_models import init_chat_model
 
-from langchain_anthropic import ChatAnthropic
-
-def _set_env(var: str):
-    if not os.environ.get(var):
-        os.environ[var] = getpass.getpass(f"{var}: ")
-
-
-_set_env("ANTHROPIC_API_KEY")
-
-llm = ChatAnthropic(model="claude-sonnet-4-6")
+model = init_chat_model("openai:gpt-5.4-mini")
 ```
 :::
 
 :::js
-1. Install dependencies
-<CodeGroup>
-```bash npm
-npm install @langchain/langgraph @langchain/core
-```
-
-```bash pnpm
-pnpm add @langchain/langgraph @langchain/core
-```
-
-```bash yarn
-yarn add @langchain/langgraph @langchain/core
-```
-
-```bash bun
-bun add @langchain/langgraph @langchain/core
-```
-</CodeGroup>
-
-2. Initialize the LLM:
-
 ```typescript
-import { ChatAnthropic } from "@langchain/anthropic";
+import { initChatModel } from "langchain/chat_models/universal";
 
-const llm = new ChatAnthropic({
-  model: "claude-sonnet-4-6",
-  apiKey: "<your_anthropic_key>"
-});
+const model = await initChatModel("openai:gpt-5.4-mini");
 ```
 :::
 
-## LLMs and augmentations
+如果模型需要结构化决策，可以使用 Structured Output，而不是让程序解析自然语言。
 
-Workflows and agentic systems are based on LLMs and the various augmentations you add to them. [Tool calling](/oss/langchain/tools), [structured outputs](/oss/langchain/structured-output), and [short term memory](/oss/langchain/short-term-memory) are a few options for tailoring LLMs to your needs.
+---
 
-![LLM augmentations](/oss/images/augmented_llm.png)
+## Prompt Chaining
+
+**Prompt Chaining** 将一个任务拆成多个顺序执行的 LLM 调用，每一步都处理上一步的结果。
+
+这种模式适合：
+
+- 一个复杂任务可以自然拆成若干阶段；
+- 希望每一步都能独立检查、重试或评估；
+- 希望在不同阶段使用不同 Prompt 或模型。
+
+例如：先生成内容，再判断其质量，最后根据判断决定继续还是终止。
+
+```text
+输入
+ ↓
+LLM 1：生成草稿
+ ↓
+质量检查
+ ├─ 通过 → LLM 2：润色 → END
+ └─ 不通过 → END / 重写
+```
 
 :::python
 ```python
-# Schema for structured output
-from pydantic import BaseModel, Field
-
-
-class SearchQuery(BaseModel):
-    search_query: str | None = Field(
-        default=None, description="Query that is optimized web search."
-    )
-    justification: str | None = Field(
-        default=None, description="Why this query is relevant to the user's request."
-    )
-
-
-# Augment the LLM with schema for structured output
-structured_llm = llm.with_structured_output(SearchQuery)
-
-# Invoke the augmented LLM
-output = structured_llm.invoke("How does Calcium CT score relate to high cholesterol?")
-print(output)  # The model returns an instance of SearchQuery.
-
-# Define a tool
-def multiply(a: int, b: int) -> int:
-    return a * b
-
-# Augment the LLM with tools
-llm_with_tools = llm.bind_tools([multiply])
-
-# Invoke the LLM with input that triggers the tool call
-msg = llm_with_tools.invoke("What is 2 times 3?")
-print(msg.tool_calls)  # The model returns a request to call the tool.
-```
-:::
-:::js
-```typescript
-
-import * as z from "zod";
-import { tool } from "langchain";
-
-// Schema for structured output
-const SearchQuery = z.object({
-  search_query: z.string().describe("Query that is optimized web search."),
-  justification: z
-    .string()
-    .describe("Why this query is relevant to the user's request."),
-});
-
-// Augment the LLM with schema for structured output
-const structuredLlm = llm.withStructuredOutput(SearchQuery);
-
-// Invoke the augmented LLM
-const output = await structuredLlm.invoke(
-  "How does Calcium CT score relate to high cholesterol?"
-);
-
-// Define a tool
-const multiply = tool(
-  ({ a, b }) => {
-    return a * b;
-  },
-  {
-    name: "multiply",
-    description: "Multiply two numbers",
-    schema: z.object({
-      a: z.number(),
-      b: z.number(),
-    }),
-  }
-);
-
-// Augment the LLM with tools
-const llmWithTools = llm.bindTools([multiply]);
-
-// Invoke the LLM with input that triggers the tool call
-const msg = await llmWithTools.invoke("What is 2 times 3?");
-
-// Get the tool call
-console.log(msg.tool_calls);
-```
-:::
-
-## Prompt chaining
-
-Prompt chaining is when each LLM call processes the output of the previous call. It's often used for performing well-defined tasks that can be broken down into smaller, verifiable steps. Some examples include:
-
-- Translating documents into different languages
-- Verifying generated content for consistency
-
-![Prompt chaining](/oss/images/prompt_chain.png)
-
-:::python
-<CodeGroup>
-```python Graph API
 from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, START, END
-from IPython.display import Image, display
 
-
-# Graph state
 class State(TypedDict):
     topic: str
-    joke: str
-    improved_joke: str
-    final_joke: str
+    draft: str
+    final: str
 
 
-# Nodes
-def generate_joke(state: State):
-    """First LLM call to generate initial joke"""
+def generate(state: State):
+    response = model.invoke(f"Write a short draft about {state['topic']}")
+    return {"draft": response.content}
 
-    msg = llm.invoke(f"Write a short joke about {state['topic']}")
-    return {"joke": msg.content}
 
-
-def check_punchline(state: State):
-    """Gate function to check if the joke has a punchline"""
-
-    # Simple check - does the joke contain "?" or "!"
-    if "?" in state["joke"] or "!" in state["joke"]:
-        return "Pass"
-    return "Fail"
-
-
-def improve_joke(state: State):
-    """Second LLM call to improve the joke"""
-
-    msg = llm.invoke(f"Make this joke funnier by adding wordplay: {state['joke']}")
-    return {"improved_joke": msg.content}
-
-
-def polish_joke(state: State):
-    """Third LLM call for final polish"""
-    msg = llm.invoke(f"Add a surprising twist to this joke: {state['improved_joke']}")
-    return {"final_joke": msg.content}
-
-
-# Build workflow
-workflow = StateGraph(State)
-
-# Add nodes
-workflow.add_node("generate_joke", generate_joke)
-workflow.add_node("improve_joke", improve_joke)
-workflow.add_node("polish_joke", polish_joke)
-
-# Add edges to connect nodes
-workflow.add_edge(START, "generate_joke")
-workflow.add_conditional_edges(
-    "generate_joke", check_punchline, {"Fail": "improve_joke", "Pass": END}
-)
-workflow.add_edge("improve_joke", "polish_joke")
-workflow.add_edge("polish_joke", END)
-
-# Compile
-chain = workflow.compile()
-
-# Show workflow
-display(Image(chain.get_graph().draw_mermaid_png()))
-
-# Invoke
-state = chain.invoke({"topic": "cats"})
-print("Initial joke:")
-print(state["joke"])
-print("\n--- --- ---\n")
-if "improved_joke" in state:
-    print("Improved joke:")
-    print(state["improved_joke"])
-    print("\n--- --- ---\n")
-
-    print("Final joke:")
-    print(state["final_joke"])
-else:
-    print("Final joke:")
-    print(state["joke"])
-```
-```python Functional API
-from langgraph.func import entrypoint, task
-
-
-# Tasks
-@task
-def generate_joke(topic: str):
-    """First LLM call to generate initial joke"""
-    msg = llm.invoke(f"Write a short joke about {topic}")
-    return msg.content
-
-
-def check_punchline(joke: str):
-    """Gate function to check if the joke has a punchline"""
-    # Simple check - does the joke contain "?" or "!"
-    if "?" in joke or "!" in joke:
-        return "Fail"
-
-    return "Pass"
-
-
-@task
-def improve_joke(joke: str):
-    """Second LLM call to improve the joke"""
-    msg = llm.invoke(f"Make this joke funnier by adding wordplay: {joke}")
-    return msg.content
-
-
-@task
-def polish_joke(joke: str):
-    """Third LLM call for final polish"""
-    msg = llm.invoke(f"Add a surprising twist to this joke: {joke}")
-    return msg.content
-
-
-@entrypoint()
-def prompt_chaining_workflow(topic: str):
-    original_joke = generate_joke(topic).result()
-    if check_punchline(original_joke) == "Pass":
-        return original_joke
-
-    improved_joke = improve_joke(original_joke).result()
-    return polish_joke(improved_joke).result()
-
-# Invoke
-stream = prompt_chaining_workflow.stream_events("cats", version="v3")
-for snapshot in stream.values:
-    print(snapshot)
-    print("\n")
-```
-</CodeGroup>
-:::
-
-:::js
-<CodeGroup>
-```typescript Graph API
-import { StateGraph, StateSchema, GraphNode, ConditionalEdgeRouter } from "@langchain/langgraph";
-import { z } from "zod/v4";
-
-// Graph state
-const State = new StateSchema({
-  topic: z.string(),
-  joke: z.string(),
-  improvedJoke: z.string(),
-  finalJoke: z.string(),
-});
-
-// Define node functions
-
-// First LLM call to generate initial joke
-const generateJoke: GraphNode<typeof State> = async (state) => {
-  const msg = await llm.invoke(`Write a short joke about ${state.topic}`);
-  return { joke: msg.content };
-};
-
-// Gate function to check if the joke has a punchline
-const checkPunchline: ConditionalEdgeRouter<{ InputSchema: typeof State; Nodes: "improveJoke" }> = (state) => {
-  // Simple check - does the joke contain "?" or "!"
-  if (state.joke?.includes("?") || state.joke?.includes("!")) {
-    return "Pass";
-  }
-  return "Fail";
-};
-
-// Second LLM call to improve the joke
-const improveJoke: GraphNode<typeof State> = async (state) => {
-  const msg = await llm.invoke(
-    `Make this joke funnier by adding wordplay: ${state.joke}`
-  );
-  return { improvedJoke: msg.content };
-};
-
-// Third LLM call for final polish
-const polishJoke: GraphNode<typeof State> = async (state) => {
-  const msg = await llm.invoke(
-    `Add a surprising twist to this joke: ${state.improvedJoke}`
-  );
-  return { finalJoke: msg.content };
-};
-
-// Build workflow
-const chain = new StateGraph(State)
-  .addNode("generateJoke", generateJoke)
-  .addNode("improveJoke", improveJoke)
-  .addNode("polishJoke", polishJoke)
-  .addEdge("__start__", "generateJoke")
-  .addConditionalEdges("generateJoke", checkPunchline, {
-    Pass: "improveJoke",
-    Fail: "__end__"
-  })
-  .addEdge("improveJoke", "polishJoke")
-  .addEdge("polishJoke", "__end__")
-  .compile();
-
-// Invoke
-const state = await chain.invoke({ topic: "cats" });
-console.log("Initial joke:");
-console.log(state.joke);
-console.log("\n--- --- ---\n");
-if (state.improvedJoke !== undefined) {
-  console.log("Improved joke:");
-  console.log(state.improvedJoke);
-  console.log("\n--- --- ---\n");
-
-  console.log("Final joke:");
-  console.log(state.finalJoke);
-} else {
-  console.log("Joke failed quality gate - no punchline detected!");
-}
-```
-```typescript Functional API
-import { task, entrypoint } from "@langchain/langgraph";
-
-// Tasks
-
-// First LLM call to generate initial joke
-const generateJoke = task("generateJoke", async (topic: string) => {
-  const msg = await llm.invoke(`Write a short joke about ${topic}`);
-  return msg.content;
-});
-
-// Gate function to check if the joke has a punchline
-function checkPunchline(joke: string) {
-  // Simple check - does the joke contain "?" or "!"
-  if (joke.includes("?") || joke.includes("!")) {
-    return "Pass";
-  }
-  return "Fail";
-}
-
-  // Second LLM call to improve the joke
-const improveJoke = task("improveJoke", async (joke: string) => {
-  const msg = await llm.invoke(
-    `Make this joke funnier by adding wordplay: ${joke}`
-  );
-  return msg.content;
-});
-
-// Third LLM call for final polish
-const polishJoke = task("polishJoke", async (joke: string) => {
-  const msg = await llm.invoke(
-    `Add a surprising twist to this joke: ${joke}`
-  );
-  return msg.content;
-});
-
-const workflow = entrypoint(
-  "jokeMaker",
-  async (topic: string) => {
-    const originalJoke = await generateJoke(topic);
-    if (checkPunchline(originalJoke) === "Pass") {
-      return originalJoke;
-    }
-    const improvedJoke = await improveJoke(originalJoke);
-    const polishedJoke = await polishJoke(improvedJoke);
-    return polishedJoke;
-  }
-);
-
-const stream = await workflow.streamEvents("cats", { version: "v3" });
-for await (const snapshot of stream.values) {
-  console.log(snapshot);
-}
-```
-</CodeGroup>
-:::
-
-## Parallelization
-
-With parallelization, LLMs work simultaneously on a task. This is either done by running multiple independent subtasks at the same time, or running the same task multiple times to check for different outputs. Parallelization is commonly used to:
-
-- Split up subtasks and run them in parallel, which increases speed
-- Run tasks multiple times to check for different outputs, which increases confidence
-
-Some examples include:
-
-- Running one subtask that processes a document for keywords, and a second subtask to check for formatting errors
-- Running a task multiple times that scores a document for accuracy based on different criteria, like the number of citations, the number of sources used, and the quality of the sources
-
-![parallelization.png](/oss/images/parallelization.png)
-
-:::python
-<CodeGroup>
-```python Graph API
-# Graph state
-class State(TypedDict):
-    topic: str
-    joke: str
-    story: str
-    poem: str
-    combined_output: str
-
-
-# Nodes
-def call_llm_1(state: State):
-    """First LLM call to generate initial joke"""
-
-    msg = llm.invoke(f"Write a joke about {state['topic']}")
-    return {"joke": msg.content}
-
-
-def call_llm_2(state: State):
-    """Second LLM call to generate story"""
-
-    msg = llm.invoke(f"Write a story about {state['topic']}")
-    return {"story": msg.content}
-
-
-def call_llm_3(state: State):
-    """Third LLM call to generate poem"""
-
-    msg = llm.invoke(f"Write a poem about {state['topic']}")
-    return {"poem": msg.content}
-
-
-def aggregator(state: State):
-    """Combine the joke, story and poem into a single output"""
-
-    combined = f"Here's a story, joke, and poem about {state['topic']}!\n\n"
-    combined += f"STORY:\n{state['story']}\n\n"
-    combined += f"JOKE:\n{state['joke']}\n\n"
-    combined += f"POEM:\n{state['poem']}"
-    return {"combined_output": combined}
-
-
-# Build workflow
-parallel_builder = StateGraph(State)
-
-# Add nodes
-parallel_builder.add_node("call_llm_1", call_llm_1)
-parallel_builder.add_node("call_llm_2", call_llm_2)
-parallel_builder.add_node("call_llm_3", call_llm_3)
-parallel_builder.add_node("aggregator", aggregator)
-
-# Add edges to connect nodes
-parallel_builder.add_edge(START, "call_llm_1")
-parallel_builder.add_edge(START, "call_llm_2")
-parallel_builder.add_edge(START, "call_llm_3")
-parallel_builder.add_edge("call_llm_1", "aggregator")
-parallel_builder.add_edge("call_llm_2", "aggregator")
-parallel_builder.add_edge("call_llm_3", "aggregator")
-parallel_builder.add_edge("aggregator", END)
-parallel_workflow = parallel_builder.compile()
-
-# Show workflow
-display(Image(parallel_workflow.get_graph().draw_mermaid_png()))
-
-# Invoke
-state = parallel_workflow.invoke({"topic": "cats"})
-print(state["combined_output"])
-```
-```python Functional API
-@task
-def call_llm_1(topic: str):
-    """First LLM call to generate initial joke"""
-    msg = llm.invoke(f"Write a joke about {topic}")
-    return msg.content
-
-
-@task
-def call_llm_2(topic: str):
-    """Second LLM call to generate story"""
-    msg = llm.invoke(f"Write a story about {topic}")
-    return msg.content
-
-
-@task
-def call_llm_3(topic):
-    """Third LLM call to generate poem"""
-    msg = llm.invoke(f"Write a poem about {topic}")
-    return msg.content
-
-
-@task
-def aggregator(topic, joke, story, poem):
-    """Combine the joke and story into a single output"""
-
-    combined = f"Here's a story, joke, and poem about {topic}!\n\n"
-    combined += f"STORY:\n{story}\n\n"
-    combined += f"JOKE:\n{joke}\n\n"
-    combined += f"POEM:\n{poem}"
-    return combined
-
-
-# Build workflow
-@entrypoint()
-def parallel_workflow(topic: str):
-    joke_fut = call_llm_1(topic)
-    story_fut = call_llm_2(topic)
-    poem_fut = call_llm_3(topic)
-    return aggregator(
-        topic, joke_fut.result(), story_fut.result(), poem_fut.result()
-    ).result()
-
-# Invoke
-stream = parallel_workflow.stream_events("cats", version="v3")
-for snapshot in stream.values:
-    print(snapshot)
-    print("\n")
-```
-</CodeGroup>
-:::
-
-:::js
-<CodeGroup>
-```typescript Graph API
-import { StateGraph, StateSchema, GraphNode } from "@langchain/langgraph";
-import * as z from "zod";
-
-// Graph state
-const State = new StateSchema({
-  topic: z.string(),
-  joke: z.string(),
-  story: z.string(),
-  poem: z.string(),
-  combinedOutput: z.string(),
-});
-
-// Nodes
-// First LLM call to generate initial joke
-const callLlm1: GraphNode<typeof State> = async (state) => {
-  const msg = await llm.invoke(`Write a joke about ${state.topic}`);
-  return { joke: msg.content };
-};
-
-// Second LLM call to generate story
-const callLlm2: GraphNode<typeof State> = async (state) => {
-  const msg = await llm.invoke(`Write a story about ${state.topic}`);
-  return { story: msg.content };
-};
-
-// Third LLM call to generate poem
-const callLlm3: GraphNode<typeof State> = async (state) => {
-  const msg = await llm.invoke(`Write a poem about ${state.topic}`);
-  return { poem: msg.content };
-};
-
-// Combine the joke, story and poem into a single output
-const aggregator: GraphNode<typeof State> = async (state) => {
-  const combined = `Here's a story, joke, and poem about ${state.topic}!\n\n` +
-    `STORY:\n${state.story}\n\n` +
-    `JOKE:\n${state.joke}\n\n` +
-    `POEM:\n${state.poem}`;
-  return { combinedOutput: combined };
-};
-
-// Build workflow
-const parallelWorkflow = new StateGraph(State)
-  .addNode("callLlm1", callLlm1)
-  .addNode("callLlm2", callLlm2)
-  .addNode("callLlm3", callLlm3)
-  .addNode("aggregator", aggregator)
-  .addEdge("__start__", "callLlm1")
-  .addEdge("__start__", "callLlm2")
-  .addEdge("__start__", "callLlm3")
-  .addEdge("callLlm1", "aggregator")
-  .addEdge("callLlm2", "aggregator")
-  .addEdge("callLlm3", "aggregator")
-  .addEdge("aggregator", "__end__")
-  .compile();
-
-// Invoke
-const result = await parallelWorkflow.invoke({ topic: "cats" });
-console.log(result.combinedOutput);
-```
-```typescript Functional API
-import { task, entrypoint } from "@langchain/langgraph";
-
-// Tasks
-
-// First LLM call to generate initial joke
-const callLlm1 = task("generateJoke", async (topic: string) => {
-  const msg = await llm.invoke(`Write a joke about ${topic}`);
-  return msg.content;
-});
-
-// Second LLM call to generate story
-const callLlm2 = task("generateStory", async (topic: string) => {
-  const msg = await llm.invoke(`Write a story about ${topic}`);
-  return msg.content;
-});
-
-// Third LLM call to generate poem
-const callLlm3 = task("generatePoem", async (topic: string) => {
-  const msg = await llm.invoke(`Write a poem about ${topic}`);
-  return msg.content;
-});
-
-// Combine outputs
-const aggregator = task("aggregator", async (params: {
-  topic: string;
-  joke: string;
-  story: string;
-  poem: string;
-}) => {
-  const { topic, joke, story, poem } = params;
-  return `Here's a story, joke, and poem about ${topic}!\n\n` +
-    `STORY:\n${story}\n\n` +
-    `JOKE:\n${joke}\n\n` +
-    `POEM:\n${poem}`;
-});
-
-// Build workflow
-const workflow = entrypoint(
-  "parallelWorkflow",
-  async (topic: string) => {
-    const [joke, story, poem] = await Promise.all([
-      callLlm1(topic),
-      callLlm2(topic),
-      callLlm3(topic),
-    ]);
-
-    return aggregator({ topic, joke, story, poem });
-  }
-);
-
-// Invoke
-const stream = await workflow.streamEvents("cats", { version: "v3" });
-for await (const snapshot of stream.values) {
-  console.log(snapshot);
-}
-```
-</CodeGroup>
-:::
-
-## Routing
-
-Routing workflows process inputs and then directs them to context-specific tasks. This allows you to define specialized flows for complex tasks. For example, a workflow built to answer product related questions might process the type of question first, and then route the request to specific processes for pricing, refunds, returns, etc.
-
-![routing.png](/oss/images/routing.png)
-
-:::python
-<CodeGroup>
-```python Graph API
-from typing_extensions import Literal
-from langchain.messages import HumanMessage, SystemMessage
-
-
-# Schema for structured output to use as routing logic
-class Route(BaseModel):
-    step: Literal["poem", "story", "joke"] = Field(
-        None, description="The next step in the routing process"
+def improve(state: State):
+    response = model.invoke(
+        f"Improve the following draft and make it concise:\n\n{state['draft']}"
     )
+    return {"final": response.content}
+
+builder = StateGraph(State)
+builder.add_node("generate", generate)
+builder.add_node("improve", improve)
+builder.add_edge(START, "generate")
+builder.add_edge("generate", "improve")
+builder.add_edge("improve", END)
 
-
-# Augment the LLM with schema for structured output
-router = llm.with_structured_output(Route)
-
-
-# State
-class State(TypedDict):
-    input: str
-    decision: str
-    output: str
-
-
-# Nodes
-def llm_call_1(state: State):
-    """Write a story"""
-
-    result = llm.invoke(state["input"])
-    return {"output": result.content}
-
-
-def llm_call_2(state: State):
-    """Write a joke"""
-
-    result = llm.invoke(state["input"])
-    return {"output": result.content}
-
-
-def llm_call_3(state: State):
-    """Write a poem"""
-
-    result = llm.invoke(state["input"])
-    return {"output": result.content}
-
-
-def llm_call_router(state: State):
-    """Route the input to the appropriate node"""
-
-    # Run the augmented LLM with structured output to serve as routing logic
-    decision = router.invoke(
-        [
-            SystemMessage(
-                content="Route the input to story, joke, or poem based on the user's request."
-            ),
-            HumanMessage(content=state["input"]),
-        ]
-    )
-
-    return {"decision": decision.step}
-
-
-# Conditional edge function to route to the appropriate node
-def route_decision(state: State):
-    # Return the node name you want to visit next
-    if state["decision"] == "story":
-        return "llm_call_1"
-    elif state["decision"] == "joke":
-        return "llm_call_2"
-    elif state["decision"] == "poem":
-        return "llm_call_3"
-
-
-# Build workflow
-router_builder = StateGraph(State)
-
-# Add nodes
-router_builder.add_node("llm_call_1", llm_call_1)
-router_builder.add_node("llm_call_2", llm_call_2)
-router_builder.add_node("llm_call_3", llm_call_3)
-router_builder.add_node("llm_call_router", llm_call_router)
-
-# Add edges to connect nodes
-router_builder.add_edge(START, "llm_call_router")
-router_builder.add_conditional_edges(
-    "llm_call_router",
-    route_decision,
-    {  # Name returned by route_decision : Name of next node to visit
-        "llm_call_1": "llm_call_1",
-        "llm_call_2": "llm_call_2",
-        "llm_call_3": "llm_call_3",
-    },
-)
-router_builder.add_edge("llm_call_1", END)
-router_builder.add_edge("llm_call_2", END)
-router_builder.add_edge("llm_call_3", END)
-
-# Compile workflow
-router_workflow = router_builder.compile()
-
-# Show the workflow
-display(Image(router_workflow.get_graph().draw_mermaid_png()))
-
-# Invoke
-state = router_workflow.invoke({"input": "Write me a joke about cats"})
-print(state["output"])
-```
-```python Functional API
-from typing_extensions import Literal
-from pydantic import BaseModel
-from langchain.messages import HumanMessage, SystemMessage
-
-
-# Schema for structured output to use as routing logic
-class Route(BaseModel):
-    step: Literal["poem", "story", "joke"] = Field(
-        None, description="The next step in the routing process"
-    )
-
-
-# Augment the LLM with schema for structured output
-router = llm.with_structured_output(Route)
-
-
-@task
-def llm_call_1(input_: str):
-    """Write a story"""
-    result = llm.invoke(input_)
-    return result.content
-
-
-@task
-def llm_call_2(input_: str):
-    """Write a joke"""
-    result = llm.invoke(input_)
-    return result.content
-
-
-@task
-def llm_call_3(input_: str):
-    """Write a poem"""
-    result = llm.invoke(input_)
-    return result.content
-
-
-def llm_call_router(input_: str):
-    """Route the input to the appropriate node"""
-    # Run the augmented LLM with structured output to serve as routing logic
-    decision = router.invoke(
-        [
-            SystemMessage(
-                content="Route the input to story, joke, or poem based on the user's request."
-            ),
-            HumanMessage(content=input_),
-        ]
-    )
-    return decision.step
-
-
-# Create workflow
-@entrypoint()
-def router_workflow(input_: str):
-    next_step = llm_call_router(input_)
-    if next_step == "story":
-        llm_call = llm_call_1
-    elif next_step == "joke":
-        llm_call = llm_call_2
-    elif next_step == "poem":
-        llm_call = llm_call_3
-
-    return llm_call(input_).result()
-
-# Invoke
-stream = router_workflow.stream_events("Write me a joke about cats", version="v3")
-for snapshot in stream.values:
-    print(snapshot)
-    print("\n")
-```
-</CodeGroup>
-:::
-
-:::js
-<CodeGroup>
-```typescript Graph API
-import { StateGraph, StateSchema, GraphNode, ConditionalEdgeRouter } from "@langchain/langgraph";
-import * as z from "zod";
-
-// Schema for structured output to use as routing logic
-const routeSchema = z.object({
-  step: z.enum(["poem", "story", "joke"]).describe(
-    "The next step in the routing process"
-  ),
-});
-
-// Augment the LLM with schema for structured output
-const router = llm.withStructuredOutput(routeSchema);
-
-// Graph state
-const State = new StateSchema({
-  input: z.string(),
-  decision: z.string(),
-  output: z.string(),
-});
-
-// Nodes
-// Write a story
-const llmCall1: GraphNode<typeof State> = async (state) => {
-  const result = await llm.invoke([{
-    role: "system",
-    content: "You are an expert storyteller.",
-  }, {
-    role: "user",
-    content: state.input
-  }]);
-  return { output: result.content };
-};
-
-// Write a joke
-const llmCall2: GraphNode<typeof State> = async (state) => {
-  const result = await llm.invoke([{
-    role: "system",
-    content: "You are an expert comedian.",
-  }, {
-    role: "user",
-    content: state.input
-  }]);
-  return { output: result.content };
-};
-
-// Write a poem
-const llmCall3: GraphNode<typeof State> = async (state) => {
-  const result = await llm.invoke([{
-    role: "system",
-    content: "You are an expert poet.",
-  }, {
-    role: "user",
-    content: state.input
-  }]);
-  return { output: result.content };
-};
-
-const llmCallRouter: GraphNode<typeof State> = async (state) => {
-  // Route the input to the appropriate node
-  const decision = await router.invoke([
-    {
-      role: "system",
-      content: "Route the input to story, joke, or poem based on the user's request."
-    },
-    {
-      role: "user",
-      content: state.input
-    },
-  ]);
-
-  return { decision: decision.step };
-};
-
-// Conditional edge function to route to the appropriate node
-const routeDecision: ConditionalEdgeRouter<{ InputSchema: typeof State; Nodes: "llmCall1" | "llmCall2" | "llmCall3" }> = (state) => {
-  // Return the node name you want to visit next
-  if (state.decision === "story") {
-    return "llmCall1";
-  } else if (state.decision === "joke") {
-    return "llmCall2";
-  } else {
-    return "llmCall3";
-  }
-};
-
-// Build workflow
-const routerWorkflow = new StateGraph(State)
-  .addNode("llmCall1", llmCall1)
-  .addNode("llmCall2", llmCall2)
-  .addNode("llmCall3", llmCall3)
-  .addNode("llmCallRouter", llmCallRouter)
-  .addEdge("__start__", "llmCallRouter")
-  .addConditionalEdges(
-    "llmCallRouter",
-    routeDecision,
-    ["llmCall1", "llmCall2", "llmCall3"],
-  )
-  .addEdge("llmCall1", "__end__")
-  .addEdge("llmCall2", "__end__")
-  .addEdge("llmCall3", "__end__")
-  .compile();
-
-// Invoke
-const state = await routerWorkflow.invoke({
-  input: "Write me a joke about cats"
-});
-console.log(state.output);
-```
-```typescript Functional API
-import * as z from "zod";
-import { task, entrypoint } from "@langchain/langgraph";
-
-// Schema for structured output to use as routing logic
-const routeSchema = z.object({
-  step: z.enum(["poem", "story", "joke"]).describe(
-    "The next step in the routing process"
-  ),
-});
-
-// Augment the LLM with schema for structured output
-const router = llm.withStructuredOutput(routeSchema);
-
-// Tasks
-// Write a story
-const llmCall1 = task("generateStory", async (input: string) => {
-  const result = await llm.invoke([{
-    role: "system",
-    content: "You are an expert storyteller.",
-  }, {
-    role: "user",
-    content: input
-  }]);
-  return result.content;
-});
-
-// Write a joke
-const llmCall2 = task("generateJoke", async (input: string) => {
-  const result = await llm.invoke([{
-    role: "system",
-    content: "You are an expert comedian.",
-  }, {
-    role: "user",
-    content: input
-  }]);
-  return result.content;
-});
-
-// Write a poem
-const llmCall3 = task("generatePoem", async (input: string) => {
-  const result = await llm.invoke([{
-    role: "system",
-    content: "You are an expert poet.",
-  }, {
-    role: "user",
-    content: input
-  }]);
-  return result.content;
-});
-
-// Route the input to the appropriate node
-const llmCallRouter = task("router", async (input: string) => {
-  const decision = await router.invoke([
-    {
-      role: "system",
-      content: "Route the input to story, joke, or poem based on the user's request."
-    },
-    {
-      role: "user",
-      content: input
-    },
-  ]);
-  return decision.step;
-});
-
-// Build workflow
-const workflow = entrypoint(
-  "routerWorkflow",
-  async (input: string) => {
-    const nextStep = await llmCallRouter(input);
-
-    let llmCall;
-    if (nextStep === "story") {
-      llmCall = llmCall1;
-    } else if (nextStep === "joke") {
-      llmCall = llmCall2;
-    } else if (nextStep === "poem") {
-      llmCall = llmCall3;
-    }
-
-    const finalResult = await llmCall(input);
-    return finalResult;
-  }
-);
-
-// Invoke
-const stream = await workflow.streamEvents("Write me a joke about cats", { version: "v3" });
-for await (const snapshot of stream.values) {
-  console.log(snapshot);
-}
-```
-</CodeGroup>
-:::
-
-## Orchestrator-worker
-
-In an orchestrator-worker configuration, the orchestrator:
-
-- Breaks down tasks into subtasks
-- Delegates subtasks to workers
-- Synthesizes worker outputs into a final result
-
-![worker.png](/oss/images/worker.png)
-
-Orchestrator-worker workflows provide more flexibility and are often used when subtasks cannot be predefined the way they can with [parallelization](#parallelization). This is common with workflows that write code or need to update content across multiple files. For example, a workflow that needs to update installation instructions for multiple Python libraries across an unknown number of documents might use this pattern.
-
-:::python
-<CodeGroup>
-```python Graph API
-from typing import Annotated, List
-import operator
-
-
-# Schema for structured output to use in planning
-class Section(BaseModel):
-    name: str = Field(
-        description="Name for this section of the report.",
-    )
-    description: str = Field(
-        description="Brief overview of the main topics and concepts to be covered in this section.",
-    )
-
-
-class Sections(BaseModel):
-    sections: List[Section] = Field(
-        description="Sections of the report.",
-    )
-
-
-# Augment the LLM with schema for structured output
-planner = llm.with_structured_output(Sections)
-```
-```python Functional API
-from typing import List
-
-
-# Schema for structured output to use in planning
-class Section(BaseModel):
-    name: str = Field(
-        description="Name for this section of the report.",
-    )
-    description: str = Field(
-        description="Brief overview of the main topics and concepts to be covered in this section.",
-    )
-
-
-class Sections(BaseModel):
-    sections: List[Section] = Field(
-        description="Sections of the report.",
-    )
-
-
-# Augment the LLM with schema for structured output
-planner = llm.with_structured_output(Sections)
-
-
-@task
-def orchestrator(topic: str):
-    """Orchestrator that generates a plan for the report"""
-    # Generate queries
-    report_sections = planner.invoke(
-        [
-            SystemMessage(content="Generate a plan for the report."),
-            HumanMessage(content=f"Here is the report topic: {topic}"),
-        ]
-    )
-
-    return report_sections.sections
-
-
-@task
-def llm_call(section: Section):
-    """Worker writes a section of the report"""
-
-    # Generate section
-    result = llm.invoke(
-        [
-            SystemMessage(content="Write a report section."),
-            HumanMessage(
-                content=f"Here is the section name: {section.name} and description: {section.description}"
-            ),
-        ]
-    )
-
-    # Write the updated section to completed sections
-    return result.content
-
-
-@task
-def synthesizer(completed_sections: list[str]):
-    """Synthesize full report from sections"""
-    final_report = "\n\n---\n\n".join(completed_sections)
-    return final_report
-
-
-@entrypoint()
-def orchestrator_worker(topic: str):
-    sections = orchestrator(topic).result()
-    section_futures = [llm_call(section) for section in sections]
-    final_report = synthesizer(
-        [section_fut.result() for section_fut in section_futures]
-    ).result()
-    return final_report
-
-# Invoke
-report = orchestrator_worker.invoke("Create a report on LLM scaling laws")
-from IPython.display import Markdown
-Markdown(report)
-```
-</CodeGroup>
-:::
-
-:::js
-<CodeGroup>
-```typescript Graph API
-
-type SectionSchema = {
-    name: string;
-    description: string;
-}
-type SectionsSchema = {
-    sections: SectionSchema[];
-}
-
-// Augment the LLM with schema for structured output
-const planner = llm.withStructuredOutput(sectionsSchema);
-```
-```typescript Functional API
-import * as z from "zod";
-import { task, entrypoint } from "@langchain/langgraph";
-
-// Schema for structured output to use in planning
-const sectionSchema = z.object({
-  name: z.string().describe("Name for this section of the report."),
-  description: z.string().describe(
-    "Brief overview of the main topics and concepts to be covered in this section."
-  ),
-});
-
-const sectionsSchema = z.object({
-  sections: z.array(sectionSchema).describe("Sections of the report."),
-});
-
-// Augment the LLM with schema for structured output
-const planner = llm.withStructuredOutput(sectionsSchema);
-
-// Tasks
-const orchestrator = task("orchestrator", async (topic: string) => {
-  // Generate queries
-  const reportSections = await planner.invoke([
-    { role: "system", content: "Generate a plan for the report." },
-    { role: "user", content: `Here is the report topic: ${topic}` },
-  ]);
-
-  return reportSections.sections;
-});
-
-const llmCall = task("sectionWriter", async (section: z.infer<typeof sectionSchema>) => {
-  // Generate section
-  const result = await llm.invoke([
-    {
-      role: "system",
-      content: "Write a report section.",
-    },
-    {
-      role: "user",
-      content: `Here is the section name: ${section.name} and description: ${section.description}`,
-    },
-  ]);
-
-  return result.content;
-});
-
-const synthesizer = task("synthesizer", async (completedSections: string[]) => {
-  // Synthesize full report from sections
-  return completedSections.join("\n\n---\n\n");
-});
-
-// Build workflow
-const workflow = entrypoint(
-  "orchestratorWorker",
-  async (topic: string) => {
-    const sections = await orchestrator(topic);
-    const completedSections = await Promise.all(
-      sections.map((section) => llmCall(section))
-    );
-    return synthesizer(completedSections);
-  }
-);
-
-// Invoke
-const stream = await workflow.streamEvents("Create a report on LLM scaling laws", { version: "v3" });
-for await (const snapshot of stream.values) {
-  console.log(snapshot);
-}
-```
-</CodeGroup>
-:::
-
-### Creating workers in LangGraph
-
-Orchestrator-worker workflows are common and LangGraph has built-in support for them. The `Send` API lets you dynamically create worker nodes and send them specific inputs. Each worker has its own state, and all worker outputs are written to a shared state key that is accessible to the orchestrator graph. This gives the orchestrator access to all worker output and allows it to synthesize them into a final output. The example below iterates over a list of sections and uses the `Send` API to send a section to each worker.
-
-
-:::python
-```python
-from langgraph.types import Send
-
-
-# Graph state
-class State(TypedDict):
-    topic: str  # Report topic
-    sections: list[Section]  # List of report sections
-    completed_sections: Annotated[
-        list, operator.add
-    ]  # All workers write to this key in parallel
-    final_report: str  # Final report
-
-
-# Worker state
-class WorkerState(TypedDict):
-    section: Section
-    completed_sections: Annotated[list, operator.add]
-
-
-# Nodes
-def orchestrator(state: State):
-    """Orchestrator that generates a plan for the report"""
-
-    # Generate queries
-    report_sections = planner.invoke(
-        [
-            SystemMessage(content="Generate a plan for the report."),
-            HumanMessage(content=f"Here is the report topic: {state['topic']}"),
-        ]
-    )
-
-    return {"sections": report_sections.sections}
-
-
-def llm_call(state: WorkerState):
-    """Worker writes a section of the report"""
-
-    # Generate section
-    section = llm.invoke(
-        [
-            SystemMessage(
-                content="Write a report section following the provided name and description. Include no preamble for each section. Use markdown formatting."
-            ),
-            HumanMessage(
-                content=f"Here is the section name: {state['section'].name} and description: {state['section'].description}"
-            ),
-        ]
-    )
-
-    # Write the updated section to completed sections
-    return {"completed_sections": [section.content]}
-
-
-def synthesizer(state: State):
-    """Synthesize full report from sections"""
-
-    # List of completed sections
-    completed_sections = state["completed_sections"]
-
-    # Format completed section to str to use as context for final sections
-    completed_report_sections = "\n\n---\n\n".join(completed_sections)
-
-    return {"final_report": completed_report_sections}
-
-
-# Conditional edge function to create llm_call workers that each write a section of the report
-def assign_workers(state: State):
-    """Assign a worker to each section in the plan"""
-
-    # Kick off section writing in parallel via Send() API
-    return [Send("llm_call", {"section": s}) for s in state["sections"]]
-
-
-# Build workflow
-orchestrator_worker_builder = StateGraph(State)
-
-# Add the nodes
-orchestrator_worker_builder.add_node("orchestrator", orchestrator)
-orchestrator_worker_builder.add_node("llm_call", llm_call)
-orchestrator_worker_builder.add_node("synthesizer", synthesizer)
-
-# Add edges to connect nodes
-orchestrator_worker_builder.add_edge(START, "orchestrator")
-orchestrator_worker_builder.add_conditional_edges(
-    "orchestrator", assign_workers, ["llm_call"]
-)
-orchestrator_worker_builder.add_edge("llm_call", "synthesizer")
-orchestrator_worker_builder.add_edge("synthesizer", END)
-
-# Compile the workflow
-orchestrator_worker = orchestrator_worker_builder.compile()
-
-# Show the workflow
-display(Image(orchestrator_worker.get_graph().draw_mermaid_png()))
-
-# Invoke
-state = orchestrator_worker.invoke({"topic": "Create a report on LLM scaling laws"})
-
-from IPython.display import Markdown
-Markdown(state["final_report"])
-```
-:::
-:::js
-```typescript
-import { StateGraph, StateSchema, ReducedValue, GraphNode, Send } from "@langchain/langgraph";
-import * as z from "zod";
-
-// Graph state
-const State = new StateSchema({
-  topic: z.string(),
-  sections: z.array(z.custom<SectionsSchema>()),
-  completedSections: new ReducedValue(
-    z.array(z.string()).default(() => []),
-    { reducer: (a, b) => a.concat(b) }
-  ),
-  finalReport: z.string(),
-});
-
-// Worker state
-const WorkerState = new StateSchema({
-  section: z.custom<SectionsSchema>(),
-  completedSections: new ReducedValue(
-    z.array(z.string()).default(() => []),
-    { reducer: (a, b) => a.concat(b) }
-  ),
-});
-
-// Nodes
-const orchestrator: GraphNode<typeof State> = async (state) => {
-  // Generate queries
-  const reportSections = await planner.invoke([
-    { role: "system", content: "Generate a plan for the report." },
-    { role: "user", content: `Here is the report topic: ${state.topic}` },
-  ]);
-
-  return { sections: reportSections.sections };
-};
-
-const llmCall: GraphNode<typeof WorkerState> = async (state) => {
-  // Generate section
-  const section = await llm.invoke([
-    {
-      role: "system",
-      content: "Write a report section following the provided name and description. Include no preamble for each section. Use markdown formatting.",
-    },
-    {
-      role: "user",
-      content: `Here is the section name: ${state.section.name} and description: ${state.section.description}`,
-    },
-  ]);
-
-  // Write the updated section to completed sections
-  return { completedSections: [section.content] };
-};
-
-const synthesizer: GraphNode<typeof State> = async (state) => {
-  // List of completed sections
-  const completedSections = state.completedSections;
-
-  // Format completed section to str to use as context for final sections
-  const completedReportSections = completedSections.join("\n\n---\n\n");
-
-  return { finalReport: completedReportSections };
-};
-
-// Conditional edge function to create llm_call workers that each write a section of the report
-const assignWorkers: ConditionalEdgeRouter<{ InputSchema: typeof State; Nodes: "llmCall" }> = (state) => {
-  // Kick off section writing in parallel via Send() API
-  return state.sections.map((section) =>
-    new Send("llmCall", { section })
-  );
-};
-
-// Build workflow
-const orchestratorWorker = new StateGraph(State)
-  .addNode("orchestrator", orchestrator)
-  .addNode("llmCall", llmCall)
-  .addNode("synthesizer", synthesizer)
-  .addEdge("__start__", "orchestrator")
-  .addConditionalEdges(
-    "orchestrator",
-    assignWorkers,
-    ["llmCall"]
-  )
-  .addEdge("llmCall", "synthesizer")
-  .addEdge("synthesizer", "__end__")
-  .compile();
-
-// Invoke
-const state = await orchestratorWorker.invoke({
-  topic: "Create a report on LLM scaling laws"
-});
-console.log(state.finalReport);
-```
-:::
-
-## Evaluator-optimizer
-
-In evaluator-optimizer workflows, one LLM call creates a response and the other evaluates that response. If the evaluator or a [human-in-the-loop](/oss/langgraph/interrupts) determines the response needs refinement, feedback is provided and the response is recreated. This loop continues until an acceptable response is generated.
-
-Evaluator-optimizer workflows are commonly used when there's particular success criteria for a task, but iteration is required to meet that criteria. For example, there's not always a perfect match when translating text between two languages. It might take a few iterations to generate a translation with the same meaning across the two languages.
-
-![evaluator_optimizer.png](/oss/images/evaluator_optimizer.png)
-
-:::python
-<CodeGroup>
-```python Graph API
-# Graph state
-class State(TypedDict):
-    joke: str
-    topic: str
-    feedback: str
-    funny_or_not: str
-
-
-# Schema for structured output to use in evaluation
-class Feedback(BaseModel):
-    grade: Literal["funny", "not funny"] = Field(
-        description="Decide if the joke is funny or not.",
-    )
-    feedback: str = Field(
-        description="If the joke is not funny, provide feedback on how to improve it.",
-    )
-
-
-# Augment the LLM with schema for structured output
-evaluator = llm.with_structured_output(Feedback)
-
-
-# Nodes
-def llm_call_generator(state: State):
-    """LLM generates a joke"""
-
-    if state.get("feedback"):
-        msg = llm.invoke(
-            f"Write a joke about {state['topic']} but take into account the feedback: {state['feedback']}"
-        )
-    else:
-        msg = llm.invoke(f"Write a joke about {state['topic']}")
-    return {"joke": msg.content}
-
-
-def llm_call_evaluator(state: State):
-    """LLM evaluates the joke"""
-
-    grade = evaluator.invoke(f"Grade the joke {state['joke']}")
-    return {"funny_or_not": grade.grade, "feedback": grade.feedback}
-
-
-# Conditional edge function to route back to joke generator or end based upon feedback from the evaluator
-def route_joke(state: State):
-    """Route back to joke generator or end based upon feedback from the evaluator"""
-
-    if state["funny_or_not"] == "funny":
-        return "Accepted"
-    elif state["funny_or_not"] == "not funny":
-        return "Rejected + Feedback"
-
-
-# Build workflow
-optimizer_builder = StateGraph(State)
-
-# Add the nodes
-optimizer_builder.add_node("llm_call_generator", llm_call_generator)
-optimizer_builder.add_node("llm_call_evaluator", llm_call_evaluator)
-
-# Add edges to connect nodes
-optimizer_builder.add_edge(START, "llm_call_generator")
-optimizer_builder.add_edge("llm_call_generator", "llm_call_evaluator")
-optimizer_builder.add_conditional_edges(
-    "llm_call_evaluator",
-    route_joke,
-    {  # Name returned by route_joke : Name of next node to visit
-        "Accepted": END,
-        "Rejected + Feedback": "llm_call_generator",
-    },
-)
-
-# Compile the workflow
-optimizer_workflow = optimizer_builder.compile()
-
-# Show the workflow
-display(Image(optimizer_workflow.get_graph().draw_mermaid_png()))
-
-# Invoke
-state = optimizer_workflow.invoke({"topic": "Cats"})
-print(state["joke"])
-```
-```python Functional API
-# Schema for structured output to use in evaluation
-class Feedback(BaseModel):
-    grade: Literal["funny", "not funny"] = Field(
-        description="Decide if the joke is funny or not.",
-    )
-    feedback: str = Field(
-        description="If the joke is not funny, provide feedback on how to improve it.",
-    )
-
-
-# Augment the LLM with schema for structured output
-evaluator = llm.with_structured_output(Feedback)
-
-
-# Nodes
-@task
-def llm_call_generator(topic: str, feedback: Feedback):
-    """LLM generates a joke"""
-    if feedback:
-        msg = llm.invoke(
-            f"Write a joke about {topic} but take into account the feedback: {feedback}"
-        )
-    else:
-        msg = llm.invoke(f"Write a joke about {topic}")
-    return msg.content
-
-
-@task
-def llm_call_evaluator(joke: str):
-    """LLM evaluates the joke"""
-    feedback = evaluator.invoke(f"Grade the joke {joke}")
-    return feedback
-
-
-@entrypoint()
-def optimizer_workflow(topic: str):
-    feedback = None
-    while True:
-        joke = llm_call_generator(topic, feedback).result()
-        feedback = llm_call_evaluator(joke).result()
-        if feedback.grade == "funny":
-            break
-
-    return joke
-
-# Invoke
-stream = optimizer_workflow.stream_events("Cats", version="v3")
-for snapshot in stream.values:
-    print(snapshot)
-    print("\n")
-```
-</CodeGroup>
-:::
-
-:::js
-<CodeGroup>
-```typescript Graph API
-import { StateGraph, StateSchema, GraphNode, ConditionalEdgeRouter } from "@langchain/langgraph";
-import * as z from "zod";
-
-// Graph state
-const State = new StateSchema({
-  joke: z.string(),
-  topic: z.string(),
-  feedback: z.string(),
-  funnyOrNot: z.string(),
-});
-
-// Schema for structured output to use in evaluation
-const feedbackSchema = z.object({
-  grade: z.enum(["funny", "not funny"]).describe(
-    "Decide if the joke is funny or not."
-  ),
-  feedback: z.string().describe(
-    "If the joke is not funny, provide feedback on how to improve it."
-  ),
-});
-
-// Augment the LLM with schema for structured output
-const evaluator = llm.withStructuredOutput(feedbackSchema);
-
-// Nodes
-const llmCallGenerator: GraphNode<typeof State> = async (state) => {
-  // LLM generates a joke
-  let msg;
-  if (state.feedback) {
-    msg = await llm.invoke(
-      `Write a joke about ${state.topic} but take into account the feedback: ${state.feedback}`
-    );
-  } else {
-    msg = await llm.invoke(`Write a joke about ${state.topic}`);
-  }
-  return { joke: msg.content };
-};
-
-const llmCallEvaluator: GraphNode<typeof State> = async (state) => {
-  // LLM evaluates the joke
-  const grade = await evaluator.invoke(`Grade the joke ${state.joke}`);
-  return { funnyOrNot: grade.grade, feedback: grade.feedback };
-};
-
-// Conditional edge function to route back to joke generator or end based upon feedback from the evaluator
-const routeJoke: ConditionalEdgeRouter<{ InputSchema: typeof State; Nodes: "llmCallGenerator" }> = (state) => {
-  // Route back to joke generator or end based upon feedback from the evaluator
-  if (state.funnyOrNot === "funny") {
-    return "Accepted";
-  } else {
-    return "Rejected + Feedback";
-  }
-};
-
-// Build workflow
-const optimizerWorkflow = new StateGraph(State)
-  .addNode("llmCallGenerator", llmCallGenerator)
-  .addNode("llmCallEvaluator", llmCallEvaluator)
-  .addEdge("__start__", "llmCallGenerator")
-  .addEdge("llmCallGenerator", "llmCallEvaluator")
-  .addConditionalEdges(
-    "llmCallEvaluator",
-    routeJoke,
-    {
-      // Name returned by routeJoke : Name of next node to visit
-      "Accepted": "__end__",
-      "Rejected + Feedback": "llmCallGenerator",
-    }
-  )
-  .compile();
-
-// Invoke
-const state = await optimizerWorkflow.invoke({ topic: "Cats" });
-console.log(state.joke);
-```
-```typescript Functional API
-import * as z from "zod";
-import { task, entrypoint } from "@langchain/langgraph";
-
-// Schema for structured output to use in evaluation
-const feedbackSchema = z.object({
-  grade: z.enum(["funny", "not funny"]).describe(
-    "Decide if the joke is funny or not."
-  ),
-  feedback: z.string().describe(
-    "If the joke is not funny, provide feedback on how to improve it."
-  ),
-});
-
-// Augment the LLM with schema for structured output
-const evaluator = llm.withStructuredOutput(feedbackSchema);
-
-// Tasks
-const llmCallGenerator = task("jokeGenerator", async (params: {
-  topic: string;
-  feedback?: z.infer<typeof feedbackSchema>;
-}) => {
-  // LLM generates a joke
-  const msg = params.feedback
-    ? await llm.invoke(
-        `Write a joke about ${params.topic} but take into account the feedback: ${params.feedback.feedback}`
-      )
-    : await llm.invoke(`Write a joke about ${params.topic}`);
-  return msg.content;
-});
-
-const llmCallEvaluator = task("jokeEvaluator", async (joke: string) => {
-  // LLM evaluates the joke
-  return evaluator.invoke(`Grade the joke ${joke}`);
-});
-
-// Build workflow
-const workflow = entrypoint(
-  "optimizerWorkflow",
-  async (topic: string) => {
-    let feedback: z.infer<typeof feedbackSchema> | undefined;
-    let joke: string;
-
-    while (true) {
-      joke = await llmCallGenerator({ topic, feedback });
-      feedback = await llmCallEvaluator(joke);
-
-      if (feedback.grade === "funny") {
-        break;
-      }
-    }
-
-    return joke;
-  }
-);
-
-// Invoke
-const stream = await workflow.streamEvents("Cats", { version: "v3" });
-for await (const snapshot of stream.values) {
-  console.log(snapshot);
-  console.log("\n");
-}
-```
-</CodeGroup>
-:::
-
-## Agents
-
-Agents are typically implemented as an LLM performing actions using [tools](/oss/langchain/tools). They operate in continuous feedback loops, and are used in situations where problems and solutions are unpredictable. Agents have more autonomy than workflows, and can make decisions about the tools they use and how to solve problems. You can still define the available toolset and guidelines for how agents behave.
-
-![agent.png](/oss/images/agent.png)
-
-<Note>
-To get started with agents, see the [quickstart](/oss/langchain/quickstart) or read more about [how they work](/oss/langchain/agents) in LangChain.
-</Note>
-
-:::python
-```python Using tools
-from langchain.tools import tool
-
-
-# Define tools
-@tool
-def multiply(a: int, b: int) -> int:
-    """Multiply `a` and `b`.
-
-    Args:
-        a: First int
-        b: Second int
-    """
-    return a * b
-
-
-@tool
-def add(a: int, b: int) -> int:
-    """Adds `a` and `b`.
-
-    Args:
-        a: First int
-        b: Second int
-    """
-    return a + b
-
-
-@tool
-def divide(a: int, b: int) -> float:
-    """Divide `a` and `b`.
-
-    Args:
-        a: First int
-        b: Second int
-    """
-    return a / b
-
-
-# Augment the LLM with tools
-tools = [add, multiply, divide]
-tools_by_name = {tool.name: tool for tool in tools}
-llm_with_tools = llm.bind_tools(tools)
-```
-
-<CodeGroup>
-```python Graph API
-from langgraph.graph import MessagesState
-from langchain.messages import SystemMessage, HumanMessage, ToolMessage
-
-
-# Nodes
-def llm_call(state: MessagesState):
-    """LLM decides whether to call a tool or not"""
-
-    return {
-        "messages": [
-            llm_with_tools.invoke(
-                [
-                    SystemMessage(
-                        content="You are a helpful assistant tasked with performing arithmetic on a set of inputs."
-                    )
-                ]
-                + state["messages"]
-            )
-        ]
-    }
-
-
-def tool_node(state: MessagesState):
-    """Performs the tool call"""
-
-    result = []
-    for tool_call in state["messages"][-1].tool_calls:
-        tool = tools_by_name[tool_call["name"]]
-        observation = tool.invoke(tool_call["args"])
-        result.append(ToolMessage(content=observation, tool_call_id=tool_call["id"]))
-    return {"messages": result}
-
-
-# Conditional edge function to route to the tool node or end based upon whether the LLM made a tool call
-def should_continue(state: MessagesState) -> Literal["tool_node", END]:
-    """Decide if we should continue the loop or stop based upon whether the LLM made a tool call"""
-
-    messages = state["messages"]
-    last_message = messages[-1]
-
-    # If the LLM makes a tool call, then perform an action
-    if last_message.tool_calls:
-        return "tool_node"
-
-    # Otherwise, we stop (reply to the user)
-    return END
-
-
-# Build workflow
-agent_builder = StateGraph(MessagesState)
-
-# Add nodes
-agent_builder.add_node("llm_call", llm_call)
-agent_builder.add_node("tool_node", tool_node)
-
-# Add edges to connect nodes
-agent_builder.add_edge(START, "llm_call")
-agent_builder.add_conditional_edges(
-    "llm_call",
-    should_continue,
-    ["tool_node", END]
-)
-agent_builder.add_edge("tool_node", "llm_call")
-
-# Compile the agent
-agent = agent_builder.compile()
-
-# Show the agent
-display(Image(agent.get_graph(xray=True).draw_mermaid_png()))
-
-# Invoke
-messages = [HumanMessage(content="Add 3 and 4.")]
-messages = agent.invoke({"messages": messages})
-for m in messages["messages"]:
-    m.pretty_print()
-```
-```python Functional API
-from langgraph.graph import add_messages
-from langchain.messages import (
-    SystemMessage,
-    HumanMessage,
-    ToolCall,
-)
-from langchain_core.messages import BaseMessage
-
-
-@task
-def call_llm(messages: list[BaseMessage]):
-    """LLM decides whether to call a tool or not"""
-    return llm_with_tools.invoke(
-        [
-            SystemMessage(
-                content="You are a helpful assistant tasked with performing arithmetic on a set of inputs."
-            )
-        ]
-        + messages
-    )
-
-
-@task
-def call_tool(tool_call: ToolCall):
-    """Performs the tool call"""
-    tool = tools_by_name[tool_call["name"]]
-    return tool.invoke(tool_call)
-
-
-@entrypoint()
-def agent(messages: list[BaseMessage]):
-    llm_response = call_llm(messages).result()
-
-    while True:
-        if not llm_response.tool_calls:
-            break
-
-        # Execute tools
-        tool_result_futures = [
-            call_tool(tool_call) for tool_call in llm_response.tool_calls
-        ]
-        tool_results = [fut.result() for fut in tool_result_futures]
-        messages = add_messages(messages, [llm_response, *tool_results])
-        llm_response = call_llm(messages).result()
-
-    messages = add_messages(messages, llm_response)
-    return messages
-
-# Invoke
-messages = [HumanMessage(content="Add 3 and 4.")]
-stream = agent.stream_events(messages, version="v3")
-for snapshot in stream.values:
-    print(snapshot)
-    print("\n")
-```
-</CodeGroup>
-:::
-
-:::js
-```typescript Using tools
-import { tool } from "@langchain/core/tools";
-import * as z from "zod";
-
-// Define tools
-const multiply = tool(
-  ({ a, b }) => {
-    return a * b;
-  },
-  {
-    name: "multiply",
-    description: "Multiply two numbers together",
-    schema: z.object({
-      a: z.number().describe("first number"),
-      b: z.number().describe("second number"),
-    }),
-  }
-);
-
-const add = tool(
-  ({ a, b }) => {
-    return a + b;
-  },
-  {
-    name: "add",
-    description: "Add two numbers together",
-    schema: z.object({
-      a: z.number().describe("first number"),
-      b: z.number().describe("second number"),
-    }),
-  }
-);
-
-const divide = tool(
-  ({ a, b }) => {
-    return a / b;
-  },
-  {
-    name: "divide",
-    description: "Divide two numbers",
-    schema: z.object({
-      a: z.number().describe("first number"),
-      b: z.number().describe("second number"),
-    }),
-  }
-);
-
-// Augment the LLM with tools
-const tools = [add, multiply, divide];
-const toolsByName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
-const llmWithTools = llm.bindTools(tools);
-```
-
-<CodeGroup>
-```typescript Graph API
-import { StateGraph, StateSchema, MessagesValue, GraphNode, ConditionalEdgeRouter } from "@langchain/langgraph";
-import { ToolNode } from "@langchain/langgraph/prebuilt";
-import {
-  SystemMessage,
-  ToolMessage
-} from "@langchain/core/messages";
-
-// Graph state
-const State = new StateSchema({
-  messages: MessagesValue,
-});
-
-// Nodes
-const llmCall: GraphNode<typeof State> = async (state) => {
-  // LLM decides whether to call a tool or not
-  const result = await llmWithTools.invoke([
-    {
-      role: "system",
-      content: "You are a helpful assistant tasked with performing arithmetic on a set of inputs."
-    },
-    ...state.messages
-  ]);
-
-  return {
-    messages: [result]
-  };
-};
-
-const toolNode = new ToolNode(tools);
-
-// Conditional edge function to route to the tool node or end
-const shouldContinue: ConditionalEdgeRouter<{ InputSchema: typeof State; Nodes: "toolNode" }> = (state) => {
-  const messages = state.messages;
-  const lastMessage = messages.at(-1);
-
-  // If the LLM makes a tool call, then perform an action
-  if (lastMessage?.tool_calls?.length) {
-    return "toolNode";
-  }
-  // Otherwise, we stop (reply to the user)
-  return "__end__";
-};
-
-// Build workflow
-const agentBuilder = new StateGraph(State)
-  .addNode("llmCall", llmCall)
-  .addNode("toolNode", toolNode)
-  // Add edges to connect nodes
-  .addEdge("__start__", "llmCall")
-  .addConditionalEdges(
-    "llmCall",
-    shouldContinue,
-    ["toolNode", "__end__"]
-  )
-  .addEdge("toolNode", "llmCall")
-  .compile();
-
-// Invoke
-const messages = [{
-  role: "user",
-  content: "Add 3 and 4."
-}];
-const result = await agentBuilder.invoke({ messages });
-console.log(result.messages);
-```
-```typescript Functional API
-import { task, entrypoint, addMessages } from "@langchain/langgraph";
-import { BaseMessageLike, ToolCall } from "@langchain/core/messages";
-
-const callLlm = task("llmCall", async (messages: BaseMessageLike[]) => {
-  // LLM decides whether to call a tool or not
-  return llmWithTools.invoke([
-    {
-      role: "system",
-      content: "You are a helpful assistant tasked with performing arithmetic on a set of inputs."
-    },
-    ...messages
-  ]);
-});
-
-const callTool = task("toolCall", async (toolCall: ToolCall) => {
-  // Performs the tool call
-  const tool = toolsByName[toolCall.name];
-  return tool.invoke(toolCall.args);
-});
-
-const agent = entrypoint(
-  "agent",
-  async (messages) => {
-    let llmResponse = await callLlm(messages);
-
-    while (true) {
-      if (!llmResponse.tool_calls?.length) {
-        break;
-      }
-
-      // Execute tools
-      const toolResults = await Promise.all(
-        llmResponse.tool_calls.map((toolCall) => callTool(toolCall))
-      );
-
-      messages = addMessages(messages, [llmResponse, ...toolResults]);
-      llmResponse = await callLlm(messages);
-    }
-
-    messages = addMessages(messages, [llmResponse]);
-    return messages;
-  }
-);
-
-// Invoke
-const messages = [{
-  role: "user",
-  content: "Add 3 and 4."
-}];
-
-const stream = await agent.streamEvents([messages], { version: "v3" });
-for await (const snapshot of stream.values) {
-  console.log(snapshot);
-}
-```
-</CodeGroup>
-:::
-
-### ToolNode
-
-@[`ToolNode`] is a prebuilt node that executes tools in LangGraph workflows. It handles parallel tool execution, error handling, and state injection automatically.
-
-Use @[`ToolNode`] when you need fine-grained control over how your graph executes tools. This is the building block that powers tool execution in many LangGraph agent patterns.
-
-:::python
-
-```python
-from langchain.tools import tool
-from langgraph.prebuilt import ToolNode
-from langgraph.graph import MessagesState, StateGraph
-
-@tool
-def search(query: str) -> str:
-    """Search for information."""
-    return f"Results for: {query}"
-
-@tool
-def calculator(expression: str) -> str:
-    """Evaluate a math expression."""
-    return str(eval(expression))
-
-builder = StateGraph(MessagesState)
-builder.add_node("tools", ToolNode([search, calculator]))
-# ... add other nodes and edges
 graph = builder.compile()
 ```
-
 :::
 
 :::js
-
 ```typescript
-import { ToolNode } from "@langchain/langgraph/prebuilt";
-import { tool } from "@langchain/core/tools";
 import * as z from "zod";
+import { StateGraph, StateSchema, START, END } from "@langchain/langgraph";
 
-const search = tool(
-  ({ query }) => `Results for: ${query}`,
-  {
-    name: "search",
-    description: "Search for information.",
-    schema: z.object({ query: z.string() }),
-  }
-);
+const State = new StateSchema({
+  topic: z.string(),
+  draft: z.string().optional(),
+  final: z.string().optional(),
+});
 
-const calculator = tool(
-  ({ expression }) => String(eval(expression)),
-  {
-    name: "calculator",
-    description: "Evaluate a math expression.",
-    schema: z.object({ expression: z.string() }),
-  }
-);
+const generate = async (state: typeof State.State) => ({
+  draft: (await model.invoke(`Write a short draft about ${state.topic}`)).content,
+});
 
-const toolNode = new ToolNode([search, calculator]);
+const improve = async (state: typeof State.State) => ({
+  final: (await model.invoke(
+    `Improve the following draft and make it concise:\n\n${state.draft}`
+  )).content,
+});
+
+const graph = new StateGraph(State)
+  .addNode("generate", generate)
+  .addNode("improve", improve)
+  .addEdge(START, "generate")
+  .addEdge("generate", "improve")
+  .addEdge("improve", END)
+  .compile();
+```
+:::
+
+Prompt Chaining 的优势是控制流清晰、易调试；代价是灵活性较低，每一步都必须按预定义路径执行。
+
+---
+
+## 并行化（Parallelization）
+
+如果多个步骤彼此独立，可以让它们在同一个 Super-step 中并行执行，再汇总结果。
+
+常见模式有两类：
+
+1. **Sectioning**：把任务拆成互相独立的子任务，并行处理。
+2. **Voting / Ensemble**：让多个模型或 Prompt 独立完成同一任务，再聚合答案。
+
+```text
+                 ┌→ 分支 A ─┐
+输入 → Fan-out ──┼→ 分支 B ─┼→ 聚合 → END
+                 └→ 分支 C ─┘
 ```
 
+:::python
+```python
+from operator import add
+from typing import Annotated
+from typing_extensions import TypedDict
+
+class State(TypedDict):
+    topic: str
+    outputs: Annotated[list[str], add]
+
+
+def joke(state: State):
+    return {"outputs": [model.invoke(f"Write a joke about {state['topic']}").content]}
+
+
+def story(state: State):
+    return {"outputs": [model.invoke(f"Write a story about {state['topic']}").content]}
+
+
+def poem(state: State):
+    return {"outputs": [model.invoke(f"Write a poem about {state['topic']}").content]}
+
+builder = StateGraph(State)
+builder.add_node("joke", joke)
+builder.add_node("story", story)
+builder.add_node("poem", poem)
+builder.add_node("aggregate", lambda state: {})
+
+builder.add_edge(START, "joke")
+builder.add_edge(START, "story")
+builder.add_edge(START, "poem")
+builder.add_edge("joke", "aggregate")
+builder.add_edge("story", "aggregate")
+builder.add_edge("poem", "aggregate")
+builder.add_edge("aggregate", END)
+```
 :::
 
-#### Access graph state and context from tools
+并行分支可能同时写同一个 State Key，因此该字段通常需要 [Reducer](/oss/langgraph/graph-api#reducers) 来定义合并语义。
 
-Tools executed by `ToolNode` receive the arguments generated by the model as
-their first argument. To read graph-side data that was not generated by the
-model, use one of these options:
+---
 
-- In Python, read state and run-scoped context from the injected
-  @[`ToolRuntime`] argument.
-- In JavaScript, read state and run-scoped context from the tool's second
-  argument, typed as @[`ToolRuntime`].
+## 路由（Routing）
 
-<Note>
-Tools can only access the state values passed to the `ToolNode`. When
-`ToolNode` is added directly as a `StateGraph` node, that input is the current
-graph state. If you invoke a `ToolNode` manually from another node, pass the
-full state when tools need custom state fields. For example, `tool_node.invoke(state)`
-or `toolNode.invoke(state, config)` exposes the full state, while passing only
-`{"messages": state["messages"]}` or `{ messages: state.messages }` only exposes
-`messages`.
-</Note>
+**Routing** 让一个步骤根据输入内容选择后续的专用路径。
+
+例如一个客服系统可以把请求分为退款、技术支持和一般咨询，再交给不同处理节点。
+
+```text
+                 ┌→ 技术支持
+输入 → 分类器 ────┼→ 退款处理
+                 └→ 一般咨询
+```
+
+推荐让分类模型返回结构化输出，使 Routing 可验证，而不是依赖脆弱的字符串匹配。
 
 :::python
+```python
+from typing import Literal
+from pydantic import BaseModel, Field
 
-<WorkflowsAgentsToolRuntimeStateContextPy />
+class Route(BaseModel):
+    step: Literal["technical", "billing", "general"] = Field(
+        description="The next step in the workflow"
+    )
 
+router = model.with_structured_output(Route)
+
+
+def route_request(state):
+    decision = router.invoke(state["input"])
+    return decision.step
+
+builder.add_conditional_edges(
+    "router",
+    route_request,
+    {
+        "technical": "technical_support",
+        "billing": "billing_support",
+        "general": "general_support",
+    },
+)
+```
+:::
+
+如果路由步骤还需要同时更新 State，可以让 Node 返回 [`Command`](/oss/langgraph/graph-api#command)，把 `update` 和 `goto` 放在同一个操作中。
+
+---
+
+## Orchestrator-Worker
+
+当任务需要动态拆分，而且事先不知道应该创建多少个子任务时，可以使用 **Orchestrator-Worker** 模式。
+
+Orchestrator 负责：
+
+1. 理解目标；
+2. 动态生成子任务；
+3. 把子任务分发给 Worker；
+4. 汇总 Worker 结果。
+
+```text
+                 ┌→ Worker 1 ─┐
+输入 → Orchestrator ─→ Worker 2 ─┼→ Synthesizer → END
+                 └→ Worker N ─┘
+```
+
+这与固定并行化不同：Worker 的数量和输入由 Runtime 决定。
+
+LangGraph 通过 [`Send`](/oss/langgraph/graph-api#send) 支持动态 Fan-out。
+
+:::python
+```python
+from operator import add
+from typing import Annotated
+from langgraph.types import Send
+
+class State(TypedDict):
+    topic: str
+    sections: list[str]
+    completed_sections: Annotated[list[str], add]
+    final_report: str
+
+
+def orchestrator(state: State):
+    plan = planner.invoke(
+        f"Break this report topic into sections: {state['topic']}"
+    )
+    return {"sections": plan.sections}
+
+
+def assign_workers(state: State):
+    return [
+        Send("worker", {"section": section})
+        for section in state["sections"]
+    ]
+
+
+def worker(state):
+    result = model.invoke(f"Write section: {state['section']}")
+    return {"completed_sections": [result.content]}
+
+
+def synthesize(state: State):
+    return {"final_report": "\n\n".join(state["completed_sections"])}
+
+builder.add_conditional_edges("orchestrator", assign_workers, ["worker"])
+```
+:::
+
+Worker 并行写入的结果字段通常使用累加 Reducer。对于研究、报告生成、代码库分析、多文档处理等动态任务，这是一种常见模式。
+
+---
+
+## Evaluator-Optimizer
+
+**Evaluator-Optimizer** 模式让一个 LLM 生成结果，另一个步骤对结果进行评价；如果不满足标准，就把反馈送回生成器继续迭代。
+
+```text
+输入 → Generator → Evaluator
+                  ├─ ACCEPT → END
+                  └─ REVISE → Generator → ...
+```
+
+它适合以下场景：
+
+- 存在明确的质量标准；
+- LLM 可以根据反馈显著改进答案；
+- 可以接受多次模型调用带来的额外延迟和成本。
+
+:::python
+```python
+from typing import Literal
+from pydantic import BaseModel
+
+class Evaluation(BaseModel):
+    grade: Literal["pass", "fail"]
+    feedback: str
+
+critic = model.with_structured_output(Evaluation)
+
+
+def generate(state):
+    prompt = f"Write an answer about {state['topic']}"
+    if state.get("feedback"):
+        prompt += f"\nImprove it using this feedback: {state['feedback']}"
+    return {"answer": model.invoke(prompt).content}
+
+
+def evaluate(state):
+    result = critic.invoke(
+        f"Evaluate this answer:\n{state['answer']}"
+    )
+    return {"grade": result.grade, "feedback": result.feedback}
+
+
+def route(state):
+    return END if state["grade"] == "pass" else "generate"
+
+builder.add_conditional_edges("evaluate", route, ["generate", END])
+```
+:::
+
+需要为循环设置明确的终止条件，例如最大迭代次数、质量阈值或 [Recursion Limit](/oss/langgraph/graph-api#recursion-limit)，避免无限循环。
+
+---
+
+## 智能体（Agents）
+
+工作流的控制路径由开发者决定，而智能体允许 LLM 自主决定下一步行动。
+
+最常见的是 **Tool-calling Agent Loop**：
+
+```text
+用户输入
+   ↓
+  LLM
+   ↓
+是否调用工具？
+ ├─ 是 → Tool → Observation ─┐
+ │                           │
+ └─ 否 → 最终回答            │
+             ↑               │
+             └───────────────┘
+```
+
+模型在每一轮决定：
+
+- 是否调用工具；
+- 调用哪个工具；
+- 传什么参数；
+- 根据 Tool Result 是否继续；
+- 什么时候输出最终答案。
+
+如果只需要标准 Tool-calling Agent，LangChain 的 [`create_agent`](/oss/langchain/agents) 已经提供了基于 LangGraph 构建的高层实现。只有在需要自定义控制流、额外审批、复杂 State 或非标准执行架构时，才需要直接使用 LangGraph 实现 Loop。
+
+### 从零构建一个 Tool-calling Agent
+
+:::python
+```python
+from langchain.tools import tool
+from langgraph.graph import MessagesState, StateGraph, START, END
+from langgraph.prebuilt import ToolNode
+
+@tool
+def multiply(a: int, b: int) -> int:
+    """Multiply two integers."""
+    return a * b
+
+tools = [multiply]
+model_with_tools = model.bind_tools(tools)
+
+
+def call_model(state: MessagesState):
+    response = model_with_tools.invoke(state["messages"])
+    return {"messages": [response]}
+
+
+def should_continue(state: MessagesState):
+    last_message = state["messages"][-1]
+    if last_message.tool_calls:
+        return "tools"
+    return END
+
+builder = StateGraph(MessagesState)
+builder.add_node("model", call_model)
+builder.add_node("tools", ToolNode(tools))
+builder.add_edge(START, "model")
+builder.add_conditional_edges("model", should_continue, ["tools", END])
+builder.add_edge("tools", "model")
+
+agent = builder.compile()
+```
 :::
 
 :::js
+```typescript
+import * as z from "zod";
+import { tool } from "@langchain/core/tools";
+import {
+  StateGraph,
+  StateSchema,
+  MessagesValue,
+  START,
+  END,
+} from "@langchain/langgraph";
+import { ToolNode } from "@langchain/langgraph/prebuilt";
 
-<WorkflowsAgentsToolRuntimeStateContextJs />
+const multiply = tool(
+  async ({ a, b }) => a * b,
+  {
+    name: "multiply",
+    description: "Multiply two integers",
+    schema: z.object({ a: z.number(), b: z.number() }),
+  }
+);
 
+const tools = [multiply];
+const modelWithTools = model.bindTools(tools);
+
+const State = new StateSchema({ messages: MessagesValue });
+
+const callModel = async (state: typeof State.State) => ({
+  messages: [await modelWithTools.invoke(state.messages)],
+});
+
+const shouldContinue = (state: typeof State.State) => {
+  const last = state.messages.at(-1);
+  return last?.tool_calls?.length ? "tools" : END;
+};
+
+const agent = new StateGraph(State)
+  .addNode("model", callModel)
+  .addNode("tools", new ToolNode(tools))
+  .addEdge(START, "model")
+  .addConditionalEdges("model", shouldContinue, ["tools", END])
+  .addEdge("tools", "model")
+  .compile();
+```
 :::
+
+### 为什么智能体需要 LangGraph Runtime
+
+一个简单的 `while tool_calls:` 循环就能实现最小 Agent，但真实应用通常还需要：
+
+- **Checkpoint**：长任务失败后从中间恢复；
+- **Interrupt**：高风险 Tool 调用前等待人工审批；
+- **Streaming**：实时输出 Token、State 和 Tool Progress；
+- **Memory**：跨 Turn / Thread 保存信息；
+- **Retry / Timeout**：处理外部 API 与模型故障；
+- **Subgraph**：拆分多智能体系统；
+- **Observability**：查看每一步为什么发生。
+
+LangGraph 的价值主要就在这些 Runtime Primitive，而不是替模型增加推理能力。
+
+## 如何选择模式
+
+| 场景 | 推荐模式 |
+| --- | --- |
+| 固定多阶段处理 | Prompt Chaining |
+| 多个互不依赖的子任务 | Parallelization |
+| 根据输入选择专用路径 | Routing |
+| 动态生成数量未知的子任务 | Orchestrator-Worker |
+| 根据反馈循环改进 | Evaluator-Optimizer |
+| 下一步由模型动态决定 | Agent |
+
+这些模式并不互斥。生产系统往往会把它们组合起来，例如：
+
+```text
+确定性 Router
+   ↓
+Orchestrator
+   ↓
+多个 Agent Worker
+   ↓
+Evaluator
+   ↓
+人工审批
+   ↓
+确定性执行
+```
+
+## 下一步
+
+- [用 LangGraph 的方式思考](/oss/langgraph/thinking-in-langgraph)：学习如何从业务问题设计 State、Node 和 Edge。
+- [Graph API](/oss/langgraph/graph-api)：深入理解 StateGraph、Reducer、Send 与 Command。
+- [Functional API](/oss/langgraph/functional-api)：使用普通控制流构建同样具备持久化能力的 Workflow。
+- [中断](/oss/langgraph/interrupts)：实现人在回路。
+- [容错](/oss/langgraph/fault-tolerance)：配置 Retry、Timeout 与 Error Handler。
