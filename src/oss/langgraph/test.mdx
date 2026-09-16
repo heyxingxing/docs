@@ -1,23 +1,21 @@
 ---
-title: Test
+title: 测试
 ---
 
-
-After you've prototyped your LangGraph agent, a natural next step is to add tests. This guide covers some useful patterns you can use when writing unit tests.
+完成 LangGraph 智能体原型后，一个自然的下一步就是添加测试。本指南介绍编写单元测试时可以使用的一些实用模式。
 
 :::python
-Note that this guide is LangGraph-specific and covers scenarios around graphs with custom structures - if you are just getting started, check out [Test](/oss/langchain/test/) that uses LangChain's built-in @[`create_agent`] instead.
+请注意，本指南专门针对 LangGraph，并覆盖自定义图结构相关的测试场景。如果你刚开始接触智能体测试，建议先阅读使用 LangChain 内置 @[`create_agent`] 的[测试指南](/oss/langchain/test/)。
 :::
 
 :::js
-Note that this guide is LangGraph-specific and covers scenarios around graphs with custom structures - if you are just getting started, check out [Test](/oss/langchain/test/) that uses LangChain's built-in @[`createAgent`] instead.
+请注意，本指南专门针对 LangGraph，并覆盖自定义图结构相关的测试场景。如果你刚开始接触智能体测试，建议先阅读使用 LangChain 内置 @[`createAgent`] 的[测试指南](/oss/langchain/test/)。
 :::
 
-
-## Prerequisites
+## 前置条件
 
 :::python
-First, make sure you have [`pytest`](https://docs.pytest.org/) installed:
+首先，确保已经安装 [`pytest`](https://docs.pytest.org/)：
 
 ```bash
 $ pip install -U pytest
@@ -25,18 +23,18 @@ $ pip install -U pytest
 :::
 
 :::js
-First, make sure you have [`vitest`](https://vitest.dev/) installed:
+首先，确保已经安装 [`vitest`](https://vitest.dev/)：
 
 ```bash
 $ npm install -D vitest
 ```
 :::
 
-## Getting started
+## 开始测试
 
-Because many LangGraph agents depend on state, a useful pattern is to create your graph before each test where you use it, then compile it within tests with a new checkpointer instance.
+由于许多 LangGraph 智能体依赖 State，一个实用模式是在每个需要使用图的测试开始前创建图，然后在测试内部使用新的 Checkpointer 实例进行编译。
 
-The below example shows how this works with a simple, linear graph that progresses through `node1` and `node2`. Each node updates the single state key `my_key`:
+下面示例展示了一个简单线性图的测试方式。图依次经过 `node1` 和 `node2`，每个节点都会更新唯一的 State Key `my_key`：
 
 :::python
 ```python
@@ -108,9 +106,9 @@ test('basic agent execution', async () => {
 ```
 :::
 
-## Testing individual nodes and edges
+## 测试单个节点和边
 
-Compiled LangGraph agents expose references to each individual node as `graph.nodes`. You can take advantage of this to test individual nodes within your agent. Note that this will bypass any checkpointers passed when compiling the graph:
+编译后的 LangGraph 智能体会通过 `graph.nodes` 暴露每个独立节点的引用。你可以利用这一点单独测试智能体中的某个节点。请注意，这种方式会绕过编译图时传入的所有 Checkpointer：
 
 :::python
 ```python
@@ -184,24 +182,24 @@ test('individual node execution', async () => {
 ```
 :::
 
-## Partial execution
+## 部分执行测试
 
-For agents made up of larger graphs, you may wish to test partial execution paths within your agent rather than the entire flow end-to-end. In some cases, it may make semantic sense to [restructure these sections as subgraphs](/oss/langgraph/use-subgraphs), which you can invoke in isolation as normal.
+对于由较大图组成的智能体，你可能希望只测试智能体中的一部分执行路径，而不是完整的端到端流程。在一些场景下，从语义上更合理的做法是[将这些部分重构为子图](/oss/langgraph/use-subgraphs)，这样就可以像普通图一样独立调用和测试。
 
-However, if you do not wish to make changes to your agent graph's overall structure, you can use LangGraph's persistence mechanisms to simulate a state where your agent is paused right before the beginning of the desired section, and will pause again at the end of the desired section. The steps are as follows:
+如果你不希望改变智能体图的整体结构，也可以使用 LangGraph 的持久化机制模拟一种状态：让智能体恰好暂停在待测试区段开始之前，并在该区段结束时再次暂停。步骤如下：
 
 :::python
-1. Compile your agent with a checkpointer (the in-memory checkpointer @[`InMemorySaver`] will suffice for testing).
-2. Call your agent's [`update_state`](/oss/langgraph/use-time-travel) method with an [`as_node`](/oss/langgraph/use-time-travel#from-a-specific-node) parameter set to the name of the node *before* the one you want to start your test.
-3. Invoke your agent with the same `thread_id` you used to update the state and an `interrupt_after` parameter set to the name of the node you want to stop at.
+1. 使用 Checkpointer 编译智能体（测试时使用内存 Checkpointer @[`InMemorySaver`] 即可）。
+2. 调用智能体的 [`update_state`](/oss/langgraph/use-time-travel) 方法，并把 [`as_node`](/oss/langgraph/use-time-travel#from-a-specific-node) 参数设置为你希望开始测试的节点的**前一个节点**名称。
+3. 使用更新 State 时相同的 `thread_id` 调用智能体，并将 `interrupt_after` 参数设置为希望停止测试的节点名称。
 :::
 :::js
-1. Compile your agent with a checkpointer (the in-memory checkpointer [`MemorySaver`](https://reference.langchain.com/javascript/classes/_langchain_langgraph-checkpoint.MemorySaver.html) will suffice for testing).
-2. Call your agent's [`update_state`](/oss/langgraph/use-time-travel) method with an [`asNode`](/oss/langgraph/use-time-travel#from-a-specific-node) parameter set to the name of the node *before* the one you want to start your test.
-3. Invoke your agent with the same `thread_id` you used to update the state and an `interruptBefore` parameter set to the name of the node you want to stop at.
+1. 使用 Checkpointer 编译智能体（测试时使用内存 Checkpointer [`MemorySaver`](https://reference.langchain.com/javascript/classes/_langchain_langgraph-checkpoint.MemorySaver.html) 即可）。
+2. 调用智能体的 [`update_state`](/oss/langgraph/use-time-travel) 方法，并把 [`asNode`](/oss/langgraph/use-time-travel#from-a-specific-node) 参数设置为你希望开始测试的节点的**前一个节点**名称。
+3. 使用更新 State 时相同的 `thread_id` 调用智能体，并将 `interruptBefore` 参数设置为希望停止测试的节点名称。
 :::
 
-Here's an example that executes only the second and third nodes in a linear graph:
+下面的示例只执行一个线性图中的第二和第三个节点：
 
 :::python
 ```python
