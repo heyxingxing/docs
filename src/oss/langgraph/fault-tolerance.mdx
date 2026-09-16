@@ -1,532 +1,208 @@
 ---
-title: Fault tolerance
-description: Configure per-node timeouts, retries, and error handlers in LangGraph.
+title: 容错
+sidebarTitle: 容错
 ---
 
-When a node fails—from a slow external API, a transient network error, or an unhandled exception—LangGraph gives you three composable mechanisms to respond:
+LangGraph 提供了构建可靠智能体所需的一组容错原语：**Retry、Timeout、Error Handler、Checkpoint、Graceful Shutdown**。这些机制分别解决瞬时失败、卡死调用、补偿逻辑、恢复执行和进程优雅退出等问题，并且可以组合使用。
 
-- [**Retries**](#retries): automatically re-run failed attempts based on exception type and backoff settings
-- [**Timeouts**](#timeouts): cap how long a single attempt may run
-- [**Error handling**](#error-handling): run a recovery function after all retries are exhausted
+## Retry Policy
 
-:::python
-Use [**`set_node_defaults`**](#graph-defaults) to configure these mechanisms once for all nodes instead of repeating them on every `add_node` call.
-:::
-
-:::js
-Use [**`setNodeDefaults`**](#graph-defaults) to configure these mechanisms once for all nodes instead of repeating them on every `addNode` call.
-:::
-
-These compose in a fixed order: when a node attempt raises any exception (including @[`NodeTimeoutError`] from a timeout), the retry policy decides whether to retry. Only after retries are exhausted does the error handler run.
-
-For stopping a run cleanly at a superstep boundary and resuming later, see [Graceful shutdown](#graceful-shutdown).
+对于可能出现瞬时错误的 Node，可以配置 @[`RetryPolicy`]。失败后，LangGraph 会根据 Policy 判断是否重试、最多重试几次，以及等待多久。
 
 :::python
-<Note>
-Per-node timeouts and node-level error handlers require `langgraph>=1.2`.
-</Note>
-:::
-
-:::js
-<Note>
-Per-node timeouts and node-level error handlers require `@langchain/langgraph>=1.4.0`.
-</Note>
-:::
-
-```mermaid
-%%{init:{'theme':'base','themeVariables':{'lineColor':'#40668D','primaryColor':'#E5F4FF','primaryTextColor':'#030710','primaryBorderColor':'#006DDD'}}}%%
-flowchart LR
-    start([Attempt starts]) --> exec[Run node]
-    exec -->|"success"| done([Continue graph])
-    exec -->|"any exception<br/>including NodeTimeoutError"| retry{retry_policy<br/>matches?}
-    retry -->|"yes, attempts left"| exec
-    retry -->|"exhausted or absent"| handler{error_handler?}
-    handler -->|"yes"| run_handler["Invoke handler<br/>with NodeError"]
-    run_handler --> route([Update state +<br/>Command goto])
-    handler -->|"no"| bubble([Exception<br/>bubbles up])
-
-    classDef process fill:#E5F4FF,stroke:#006DDD,stroke-width:2px,color:#030710
-    classDef decision fill:#FDF3FF,stroke:#7E65AE,stroke-width:2px,color:#504B5F
-    classDef alert fill:#F8E8E6,stroke:#B27D75,stroke-width:2px,color:#634643
-    classDef output fill:#EBD0F0,stroke:#885270,stroke-width:2px,color:#441E33
-
-    class exec,run_handler process
-    class retry,handler decision
-    class bubble alert
-    class done,route,start output
-```
-
-## Retries
-
-A retry policy automatically re-runs a failed node attempt based on exception type and backoff settings.
-
-:::python
-Pass `retry_policy=` to @[`add_node`]:
-
 ```python
+from langgraph.graph import StateGraph, START
 from langgraph.types import RetryPolicy
 
+builder = StateGraph(State)
 builder.add_node(
     "call_api",
     call_api,
-    retry_policy=RetryPolicy(max_attempts=3),
+    retry_policy=RetryPolicy(
+        max_attempts=3,
+        initial_interval=1.0,
+        backoff_factor=2.0,
+        max_interval=10.0,
+        jitter=True,
+    ),
 )
+builder.add_edge(START, "call_api")
+graph = builder.compile()
 ```
 :::
 
 :::js
-Pass `retryPolicy` to @[`addNode`]:
-
 ```typescript
-import { StateGraph } from "@langchain/langgraph";
-
-const graph = new StateGraph(State)
-  .addNode("callApi", callApi, { retryPolicy: { maxAttempts: 3 } })
-  .compile();
-```
-:::
-
-### Default behavior
-
-:::python
-By default, `retry_on` uses `default_retry_on`, which retries on **any** exception except the following (and their subclasses):
-
-- `ValueError`
-- `TypeError`
-- `ArithmeticError`
-- `ImportError`
-- `LookupError`
-- `NameError`
-- `SyntaxError`
-- `RuntimeError`
-- `ReferenceError`
-- `StopIteration`
-- `StopAsyncIteration`
-- `OSError`
-
-For exceptions from popular HTTP libraries such as `requests` and `httpx`, it only retries on 5xx status codes. @[`NodeTimeoutError`] is retryable by default.
-:::
-
-:::js
-Retries are opt-in. A node retries only when it has a `retryPolicy` configured, either directly or through graph defaults with [`setNodeDefaults`](#graph-defaults). An empty policy (`{}`) is enough. Without a policy, the first failure ends the attempt and LangGraph does not call `retryOn`.
-
-If the policy omits `retryOn`, LangGraph uses a built-in handler that retries thrown errors except:
-
-- Abort and cancellation errors: `error.name === "AbortError"`, or `error.message` starts with `"Cancel"` or `"AbortError"`
-- `GraphValueError`, matched by `error.name`
-- Aborted connections: `error.code === "ECONNABORTED"`
-- HTTP client errors with status 400, 401, 402, 403, 404, 405, 406, 407, or 409, read from `error.response?.status` or `error.status` for clients such as `fetch`, Axios, and similar clients
-- OpenAI-style quota errors: `error.error?.code === "insufficient_quota"`
-
-Other HTTP statuses, including 408 and 5xx responses, are retryable unless you override `retryOn`. @[`NodeTimeoutError`] is not on this blocklist, so it is retryable when a retry policy is configured.
-
-Some failures bypass `retryOn`. Graph control-flow errors, such as `GraphInterrupt` and `Command` routing, bubble up without retrying. An aborted run signal also stops the retry loop, even if `retryOn` would return `true`.
-:::
-
-### Parameters
-
-:::python
-| Parameter | Type | Default | Description |
-| --------- | ---- | ------- | ----------- |
-| `max_attempts` | `int` | `3` | Maximum number of attempts, including the first. |
-| `initial_interval` | `float` | `0.5` | Seconds before the first retry. |
-| `backoff_factor` | `float` | `2.0` | Multiplier applied to the interval after each retry. |
-| `max_interval` | `float` | `128.0` | Maximum seconds between retries. |
-| `jitter` | `bool` | `True` | Add random jitter to the interval. |
-| `retry_on` | `type[Exception] \| Sequence[type[Exception]] \| Callable[[Exception], bool]` | `default_retry_on` | Exceptions to retry on, or a callable returning `True` for retryable exceptions. |
-:::
-
-:::js
-| Parameter | Type | Default | Description |
-| --------- | ---- | ------- | ----------- |
-| `maxAttempts` | `number` | `3` | Maximum number of attempts, including the first. |
-| `initialInterval` | `number` | `500` | Milliseconds before the first retry. |
-| `backoffFactor` | `number` | `2.0` | Multiplier applied to the interval after each retry. |
-| `maxInterval` | `number` | `128000` | Maximum milliseconds between retries. |
-| `jitter` | `boolean` | `true` | Add random jitter to the interval. |
-| `retryOn` | `(error: unknown) => boolean` | built-in handler (when policy is set) | Callable returning `true` for retryable exceptions. Only used when `retryPolicy` is configured. |
-| `logWarning` | `boolean` | `true` | Whether to log a warning when a retry is attempted. |
-:::
-
-### Custom retry logic
-
-:::python
-Pass a callable or exception type to `retry_on`. Import `default_retry_on` to extend the default behavior:
-
-```python
-from langgraph.types import RetryPolicy, default_retry_on
-
-def custom_retry_on(exc: BaseException) -> bool:
-    if isinstance(exc, MyCustomError):
-        return False
-    return default_retry_on(exc)
-
-builder.add_node(
-    "call_api",
-    call_api,
-    retry_policy=RetryPolicy(max_attempts=3, retry_on=custom_retry_on),
-)
-```
-:::
-
-:::js
-Pass a callable to `retryOn`. Unlike Python, there is no exported `defaultRetryOn` helper—implement your own predicate:
-
-```typescript
-import { StateGraph } from "@langchain/langgraph";
-
-class MyCustomError extends Error {}
-
 const graph = new StateGraph(State)
   .addNode("callApi", callApi, {
     retryPolicy: {
       maxAttempts: 3,
-      retryOn: (error: unknown) => {
-        if (error instanceof MyCustomError) return false;
-        // Retry on other errors
-        return true;
-      },
+      initialInterval: 1000,
+      backoffFactor: 2,
+      maxInterval: 10000,
+      jitter: true,
+    },
+  })
+  .addEdge(START, "callApi")
+  .compile();
+```
+:::
+
+`retry_on` / `retryOn` 可以进一步控制哪些 Error 应重试。例如，只对 `ConnectionError`、Rate Limit 等瞬时错误重试，而不要自动重试参数错误和永久性业务错误。
+
+:::python
+```python
+retry_policy = RetryPolicy(
+    max_attempts=3,
+    retry_on=ConnectionError,
+)
+```
+:::
+
+:::js
+```typescript
+retryPolicy: {
+  maxAttempts: 3,
+  retryOn: (err) => err instanceof ConnectionError,
+}
+```
+:::
+
+### 多个 Retry Policy
+
+Python 可以给一个 Node 提供多个 Retry Policy。LangGraph 会按顺序检查，并使用第一个匹配的 Policy：
+
+```python
+builder.add_node(
+    "call_api",
+    call_api,
+    retry_policy=[
+        RetryPolicy(max_attempts=5, retry_on=RateLimitError),
+        RetryPolicy(max_attempts=3, retry_on=ConnectionError),
+    ],
+)
+```
+
+### Retry 与持久化
+
+当图配置了 Checkpointer 时，Retry 只针对**当前 Node Attempt**。之前已经完成的 Super-step 不会重新执行；同一 Super-step 中已经成功的并行 Node Write 也会通过 [Pending Writes](/oss/langgraph/checkpointers#pending-writes) 保留，因此 Resume 时只需要重新处理失败部分。
+
+## Timeout
+
+:::python
+<Note>
+需要 `langgraph>=1.2`。Node Timeout 仅支持 Async Node；对 Sync Node 配置 `timeout` 会在编译时被拒绝。
+</Note>
+:::
+
+:::js
+<Note>
+需要 `@langchain/langgraph>=1.4.0`。
+</Note>
+:::
+
+Timeout 用于限制单次 Node Attempt 的最长运行时间。LangGraph 支持两类 Timeout：
+
+- **Run Timeout**：从 Node Attempt 开始起计算的硬上限。
+- **Idle Timeout**：如果一段时间内没有可观察到的进展，则认为 Node 卡住。
+
+:::python
+```python
+from langgraph.types import TimeoutPolicy
+
+builder.add_node(
+    "call_model",
+    call_model,
+    timeout=TimeoutPolicy(
+        run_timeout=60,
+        idle_timeout=30,
+    ),
+)
+```
+:::
+
+:::js
+```typescript
+const graph = new StateGraph(State)
+  .addNode("callModel", callModel, {
+    timeout: {
+      runTimeout: 60_000,
+      idleTimeout: 30_000,
     },
   })
   .compile();
 ```
 :::
 
-### Inspect retry state
+### Idle Timeout 与进度信号
 
-Use execution info inside a node to inspect the current attempt number. This is useful for switching to a fallback when the primary call keeps failing:
+Idle Timeout 不是简单的“函数没有返回”。只要 Runtime 观察到有进展，就可以刷新 Idle Timer。可以通过 `refresh_on` / `refreshOn` 选择哪些事件视为活动，也可以在 Node 内手动调用 `runtime.heartbeat()` / `runtime.heartbeat?.()`。
 
-:::python
-```python
-from langgraph.graph import StateGraph, START, END
-from langgraph.runtime import Runtime
-from langgraph.types import RetryPolicy
-from typing_extensions import TypedDict
-
-class State(TypedDict):
-    result: str
-
-def my_node(state: State, runtime: Runtime) -> State:
-    if runtime.execution_info.node_attempt > 1:  # [!code highlight]
-        return {"result": call_fallback_api()}
-    return {"result": call_primary_api()}
-
-builder = StateGraph(State)
-builder.add_node("my_node", my_node, retry_policy=RetryPolicy(max_attempts=3))
-builder.add_edge(START, "my_node")
-builder.add_edge("my_node", END)
-```
-
-`execution_info` exposes the following fields:
-
-| Attribute | Type | Description |
-| --------- | ---- | ----------- |
-| `node_attempt` | `int` | Current attempt number (1-indexed). `1` on the first try, `2` on the first retry, etc. |
-| `node_first_attempt_time` | `float \| None` | Unix timestamp of when the first attempt started. Constant across retries. |
-| `thread_id` | `str \| None` | Thread ID for the current execution. `None` without a checkpointer. |
-| `run_id` | `str \| None` | Run ID for the current execution. `None` when not provided in config. |
-| `checkpoint_id` | `str` | Checkpoint ID for the current execution. |
-| `task_id` | `str` | Task ID for the current execution. |
-
-`execution_info` is available even without a retry policy—`node_attempt` defaults to `1`.
-:::
-
-:::js
-```typescript
-import { StateGraph, StateSchema, START, END, type Runtime } from "@langchain/langgraph";
-import * as z from "zod";
-
-const State = new StateSchema({
-  result: z.string(),
-});
-
-const myNode = async (state: typeof State.State, runtime: Runtime<typeof State>) => {
-  if ((runtime.executionInfo?.nodeAttempt ?? 1) > 1) {  // [!code highlight]
-    return { result: await callFallbackApi() };
-  }
-  return { result: await callPrimaryApi() };
-};
-
-const graph = new StateGraph(State)
-  .addNode("myNode", myNode, { retryPolicy: { maxAttempts: 3 } })
-  .addEdge(START, "myNode")
-  .addEdge("myNode", END)
-  .compile();
-```
-
-`executionInfo` exposes the following fields:
-
-| Attribute | Type | Description |
-| --------- | ---- | ----------- |
-| `nodeAttempt` | `number` | Current attempt number (1-indexed). `1` on the first try, `2` on the first retry, etc. |
-| `nodeFirstAttemptTime` | `number \| undefined` | Unix timestamp (ms) of when the first attempt started. Constant across retries. |
-| `threadId` | `string \| undefined` | Thread ID for the current execution. `undefined` without a checkpointer. |
-| `runId` | `string \| undefined` | Run ID for the current execution. `undefined` when not provided in config. |
-| `checkpointId` | `string` | Checkpoint ID for the current execution. |
-| `checkpointNs` | `string` | Checkpoint namespace for the current execution. |
-| `taskId` | `string` | Task ID for the current execution. |
-
-`executionInfo` is available even without a retry policy—`nodeAttempt` defaults to `1`.
-:::
-
-## Timeouts
-
-:::python
-<Note>
-Requires `langgraph>=1.2`.
-</Note>
-
-The `timeout=` parameter on @[`add_node`] caps how long a single node attempt may run. Pass a number (seconds), a `timedelta`, or a @[`TimeoutPolicy`] for separate run and idle limits:
-
-```python
-from datetime import timedelta
-from langgraph.types import TimeoutPolicy
-
-# Simple wall-clock cap
-builder.add_node("call_model", call_model, timeout=60)
-builder.add_node("call_model", call_model, timeout=timedelta(minutes=2))
-
-# Separate run and idle limits
-builder.add_node(
-    "call_model",
-    call_model,
-    timeout=TimeoutPolicy(run_timeout=120, idle_timeout=30),
-)
-```
-
-<Warning>
-Node timeouts only apply to **async** nodes. Sync nodes with a `timeout` are rejected at compile time. To wrap blocking I/O, use `asyncio.to_thread` inside an async node.
-</Warning>
-:::
-
-:::js
-<Note>
-Requires `@langchain/langgraph>=1.4.0`.
-</Note>
-
-The `timeout` parameter on @[`addNode`] caps how long a single node attempt may run. Pass a number (milliseconds) or a @[`TimeoutPolicy`] for separate run and idle limits:
-
-```typescript
-import { StateGraph, type TimeoutPolicy } from "@langchain/langgraph";
-
-// Simple wall-clock cap (60 seconds)
-new StateGraph(State).addNode("callModel", callModel, { timeout: 60_000 });
-
-// Separate run and idle limits
-new StateGraph(State).addNode("callModel", callModel, {
-  timeout: { runTimeout: 120_000, idleTimeout: 30_000 },
-});
-```
-:::
-
-### Run timeout
-
-:::python
-`run_timeout` is a hard wall-clock cap on a single attempt. It is never refreshed, regardless of node activity:
-
-```python
-from langgraph.types import TimeoutPolicy
-
-builder.add_node(
-    "call_model",
-    call_model,
-    timeout=TimeoutPolicy(run_timeout=120),
-)
-```
-:::
-
-:::js
-`runTimeout` is a hard wall-clock cap on a single attempt. It is never refreshed, regardless of node activity:
-
-```typescript
-const graph = new StateGraph(State)
-  .addNode("callModel", callModel, {
-    timeout: { runTimeout: 120_000 },
-  })
-  .compile();
-```
-:::
-
-When the limit is exceeded, LangGraph raises @[`NodeTimeoutError`], clears any writes from the failed attempt, and lets the retry policy decide whether to retry.
-
-### Idle timeout
-
-:::python
-`idle_timeout` is a progress-resetting cap. It fires only when the node stops making observable progress for the specified duration—unlike `run_timeout`, the clock resets whenever the node produces a progress signal:
-
-```python
-builder.add_node(
-    "call_model",
-    call_model,
-    timeout=TimeoutPolicy(idle_timeout=30),
-)
-```
-:::
-
-:::js
-`idleTimeout` is a progress-resetting cap. It fires only when the node stops making observable progress for the specified duration—unlike `runTimeout`, the clock resets whenever the node produces a progress signal:
-
-```typescript
-const graph = new StateGraph(State)
-  .addNode("callModel", callModel, {
-    timeout: { idleTimeout: 30_000 },
-  })
-  .compile();
-```
-:::
-
-:::python
-You can set `run_timeout` and `idle_timeout` together. Whichever fires first cancels the attempt.
-:::
-
-:::js
-You can set `runTimeout` and `idleTimeout` together. Whichever fires first cancels the attempt.
-:::
-
-#### Progress signals
-
-:::python
-Under the default `refresh_on="auto"`, the idle clock resets on any of the following:
-
-- State writes via `CONFIG_KEY_SEND`
-- Stream output (yielded async stream chunks)
-- Child-task scheduling
-- Runtime stream-writer calls
-- Any LangChain callback event from the node or its descendants (LLM tokens, tool calls, chain start/end, etc.)
-:::
-
-:::js
-Under the default `refreshOn: "auto"`, the idle clock resets on any of the following:
-
-- State writes through the graph write path
-- Custom stream output via `runtime.writer`
-- Child-task scheduling
-- Any LangChain callback event from the node or its descendants (LLM tokens, tool calls, chain start/end, etc.)
-:::
-
-#### Heartbeat mode
-
-:::python
-Set `refresh_on="heartbeat"` to narrow the refresh source to explicit `runtime.heartbeat()` calls only. This is useful when you want a strict idle definition that isn't reset by chatty subordinates:
-
-```python
-builder.add_node(
-    "call_model",
-    call_model,
-    timeout=TimeoutPolicy(idle_timeout=30, refresh_on="heartbeat"),
-)
-```
-:::
-
-:::js
-Set `refreshOn: "heartbeat"` to narrow the refresh source to explicit `runtime.heartbeat()` calls only. This is useful when you want a strict idle definition that isn't reset by chatty subordinates:
-
-```typescript
-const graph = new StateGraph(State)
-  .addNode("callModel", callModel, {
-    timeout: { idleTimeout: 30_000, refreshOn: "heartbeat" },
-  })
-  .compile();
-```
-:::
-
-#### Manual heartbeats
-
-For long-running work that doesn't naturally emit progress signals, call `runtime.heartbeat()` to manually reset the idle clock:
+这对于长时间批处理、模型 Streaming 或持续收到外部事件的 Node 很重要：只要 Node 仍在推进，就不应该因为总运行时间很长而被误判为卡死。
 
 :::python
 ```python
-from langgraph.graph import StateGraph, START, END
 from langgraph.runtime import Runtime
 from langgraph.types import TimeoutPolicy
-from typing_extensions import TypedDict
 
-class State(TypedDict):
-    result: str
-
-async def long_running_node(state: State, runtime: Runtime) -> State:
-    for batch in fetch_batches():
+async def long_running_node(state: State, runtime: Runtime):
+    async for batch in fetch_batches():
         process(batch)
-        runtime.heartbeat()  # [!code highlight]
+        runtime.heartbeat()
     return {"result": "done"}
 
-builder = StateGraph(State)
 builder.add_node(
     "long_running_node",
     long_running_node,
     timeout=TimeoutPolicy(idle_timeout=30, refresh_on="heartbeat"),
 )
-builder.add_edge(START, "long_running_node")
-builder.add_edge("long_running_node", END)
 ```
 :::
 
 :::js
 ```typescript
-import {
-  StateGraph,
-  StateSchema,
-  START,
-  END,
-  type Runtime,
-} from "@langchain/langgraph";
-import * as z from "zod";
-
-const State = new StateSchema({
-  result: z.string(),
-});
-
-const longRunningNode = async (
-  state: typeof State.State,
-  runtime: Runtime<typeof State>
-) => {
-  for (const batch of fetchBatches()) {
+const longRunningNode = async (state, runtime) => {
+  for await (const batch of fetchBatches()) {
     process(batch);
-    runtime.heartbeat?.(); // [!code highlight]
+    runtime.heartbeat?.();
   }
   return { result: "done" };
 };
 
-const graph = new StateGraph(State)
-  .addNode("longRunningNode", longRunningNode, {
-    timeout: { idleTimeout: 30_000, refreshOn: "heartbeat" },
-  })
-  .addEdge(START, "longRunningNode")
-  .addEdge("longRunningNode", END)
-  .compile();
+builder.addNode("longRunningNode", longRunningNode, {
+  timeout: { idleTimeout: 30_000, refreshOn: "heartbeat" },
+});
 ```
 :::
 
-`runtime.heartbeat()` is a no-op outside an idle-timed attempt, so you can call it unconditionally.
+`runtime.heartbeat()` 在没有启用 Idle Timeout 时是 No-op，因此可以无条件调用。
 
-### NodeTimeoutError
+### `NodeTimeoutError`
 
-When a timeout fires, LangGraph raises @[`NodeTimeoutError`] with structured context about which limit was hit:
+Timeout 触发后，LangGraph 抛出 @[`NodeTimeoutError`]，其中包含具体是哪个限制被触发。
 
 :::python
-| Attribute | Type | Description |
-| --------- | ---- | ----------- |
-| `node` | `str` | Name of the node whose execution timed out. |
-| `elapsed` | `float` | Seconds elapsed before the timeout fired. |
-| `kind` | `Literal["idle", "run"]` | Which timeout fired. |
-| `idle_timeout` | `float \| None` | The configured idle timeout (seconds), if any. |
-| `run_timeout` | `float \| None` | The configured run timeout (seconds), if any. |
+| 属性 | 类型 | 说明 |
+| --- | --- | --- |
+| `node` | `str` | 超时 Node 名称 |
+| `elapsed` | `float` | 触发 Timeout 前已经运行的秒数 |
+| `kind` | `"idle" \| "run"` | 触发的是 Idle 还是 Run Timeout |
+| `idle_timeout` | `float \| None` | 配置的 Idle Timeout |
+| `run_timeout` | `float \| None` | 配置的 Run Timeout |
 :::
 
 :::js
-| Attribute | Type | Description |
-| --------- | ---- | ----------- |
-| `node` | `string` | Name of the node whose execution timed out. |
-| `elapsed` | `number` | Milliseconds elapsed before the timeout fired. |
-| `kind` | `"idle" \| "run"` | Which timeout fired. |
-| `timeout` | `number` | The value (ms) of the timeout that fired. |
-| `idleTimeout` | `number \| undefined` | The configured idle timeout (milliseconds), if any. |
-| `runTimeout` | `number \| undefined` | The configured run timeout (milliseconds), if any. |
-
-Use `isNodeTimeoutError(error)` to narrow caught errors in TypeScript.
+| 属性 | 类型 | 说明 |
+| --- | --- | --- |
+| `node` | `string` | 超时 Node 名称 |
+| `elapsed` | `number` | 已运行毫秒数 |
+| `kind` | `"idle" \| "run"` | 超时类型 |
+| `timeout` | `number` | 实际触发的 Timeout 值 |
+| `idleTimeout` | `number \| undefined` | 配置的 Idle Timeout |
+| `runTimeout` | `number \| undefined` | 配置的 Run Timeout |
 :::
 
-`NodeTimeoutError` is retryable by default. Combining `timeout` with a retry policy works out of the box—the timeout clock resets on each new attempt, and writes from a timed-out attempt are cleared before the next retry:
+`NodeTimeoutError` 默认被视为可重试错误。因此 Timeout 可以直接与 Retry Policy 组合：每次新 Attempt 都会重置 Timeout Clock，而超时 Attempt 已缓冲的 Write 会在下一次 Retry 前清除。
 
 :::python
 ```python
@@ -543,18 +219,16 @@ builder.add_node(
 
 :::js
 ```typescript
-const graph = new StateGraph(State)
-  .addNode("callModel", callModel, {
-    timeout: { idleTimeout: 30_000 },
-    retryPolicy: { maxAttempts: 3 },
-  })
-  .compile();
+builder.addNode("callModel", callModel, {
+  timeout: { idleTimeout: 30_000 },
+  retryPolicy: { maxAttempts: 3 },
+});
 ```
 :::
 
-### Dynamic timeouts with Send
+### 使用 `Send` 动态覆盖 Timeout
 
-When using @[`Send`] to dispatch nodes dynamically (for example, in map-reduce patterns), you can pass a timeout directly on the `Send` to override the target node's static timeout for that specific push:
+通过 @[`Send`] 动态 Fan-out 时，可以为某一次 Push 单独指定 Timeout，并覆盖目标 Node 的静态配置：
 
 :::python
 ```python
@@ -562,7 +236,11 @@ from langgraph.types import Send, TimeoutPolicy
 
 def fan_out(state: OverallState):
     return [
-        Send("process_item", {"item": item}, timeout=TimeoutPolicy(idle_timeout=15))
+        Send(
+            "process_item",
+            {"item": item},
+            timeout=TimeoutPolicy(idle_timeout=15),
+        )
         for item in state["items"]
     ]
 ```
@@ -570,43 +248,40 @@ def fan_out(state: OverallState):
 
 :::js
 ```typescript
-import { Send } from "@langchain/langgraph";
-
-const fanOut = (state: typeof State.State) =>
+const fanOut = (state) =>
   state.items.map(
-    (item) =>
-      new Send("processItem", { item }, { timeout: { idleTimeout: 15_000 } })
+    (item) => new Send(
+      "processItem",
+      { item },
+      { timeout: { idleTimeout: 15_000 } }
+    )
   );
 ```
 :::
 
-:::python
-If the timeout is omitted on the `Send`, the target node's timeout (set at @[`add_node`] time) applies. This lets you set a default timeout on the node and tighten it for individual calls.
-:::
+如果 `Send` 没有传 Timeout，则使用目标 Node 在 `add_node` / `addNode` 时配置的默认值。
 
-:::js
-If the timeout is omitted on the `Send`, the target node's timeout (set at @[`addNode`] time) applies. This lets you set a default timeout on the node and tighten it for individual calls.
-:::
-
-## Error handling
+## Error Handler
 
 :::python
 <Note>
-Requires `langgraph>=1.2`.
+需要 `langgraph>=1.2`。
 </Note>
 :::
 
 :::js
 <Note>
-Requires `@langchain/langgraph>=1.4.0`.
+需要 `@langchain/langgraph>=1.4.0`。
 </Note>
 :::
 
-An error handler runs after a node fails and all retries are exhausted. It receives the current state and can update it or route to a different node using @[`Command`]. This is useful for compensation flows (Saga patterns) where you want to recover gracefully rather than abort the entire graph.
+当 Node 失败且 Retry 已全部耗尽后，可以运行 Error Handler。Handler 会接收当前 State，并可以：
+
+- 返回普通 State Update；
+- 返回 @[`Command`] 同时更新 State 并跳转到补偿节点；
+- 实现 Saga / Compensation Flow，而不是让整个 Graph 立即失败。
 
 :::python
-Pass `error_handler=` to @[`add_node`]:
-
 ```python
 from langgraph.errors import NodeError
 from langgraph.types import Command, RetryPolicy
@@ -644,38 +319,12 @@ graph = (
 :::
 
 :::js
-Pass `errorHandler` to @[`addNode`] on @[`StateGraph`] only (not the base `Graph` class):
-
 ```typescript
-import {
-  StateGraph,
-  StateSchema,
-  START,
-  Command,
-  NodeError,
-} from "@langchain/langgraph";
-import * as z from "zod";
-
-class ConnectionError extends Error {}
-
-const State = new StateSchema({
-  status: z.string(),
-});
-
-const chargePayment = () => {
-  throw new Error("payment gateway timeout");
-};
-
-const paymentErrorHandler = (
-  state: typeof State.State,
-  error: NodeError
-) =>
+const paymentErrorHandler = (state, error: NodeError) =>
   new Command({
     update: { status: `compensated: ${error.error.message}` },
     goto: "finalize",
   });
-
-const finalize = (state: typeof State.State) => state;
 
 const graph = new StateGraph(State)
   .addNode("chargePayment", chargePayment, {
@@ -691,13 +340,13 @@ const graph = new StateGraph(State)
 ```
 :::
 
-The handler fires only after the retry policy is exhausted, or immediately if no retry policy is configured. The retry policy and the error handler stay decoupled: configure when to retry and when to compensate independently.
+Handler 只有在 Retry Policy 耗尽后才触发；如果没有配置 Retry，则首次失败就进入 Handler。因此“什么时候重试”和“重试失败后如何补偿”是两套解耦策略。
 
-### NodeError
+### `NodeError`
+
+Handler 可以通过类型标注请求 `NodeError`：
 
 :::python
-Error handlers receive failure context through a typed `error: NodeError` parameter, injected by type annotation (the same pattern as `runtime: Runtime`):
-
 ```python
 from langgraph.errors import NodeError
 
@@ -706,177 +355,56 @@ def my_handler(state: State, error: NodeError) -> Command:
     return Command(update={"status": "recovered"}, goto="next_step")
 ```
 
-@[`NodeError`] is a frozen dataclass with two fields:
-
-| Attribute | Type | Description |
-| --------- | ---- | ----------- |
-| `node` | `str` | Name of the node whose execution failed. |
-| `error` | `BaseException` | The exception raised by the failed node. |
-
-The `error: NodeError` parameter is opt-in. Handlers that don't need failure context can use simpler signatures like `(state)` or `(state, runtime)`.
+| 属性 | 类型 | 说明 |
+| --- | --- | --- |
+| `node` | `str` | 失败 Node 名称 |
+| `error` | `BaseException` | 原始异常 |
 :::
 
 :::js
-Error handlers receive failure context through a typed `error: NodeError` parameter:
-
 ```typescript
-import { Command, NodeError } from "@langchain/langgraph";
-
-const myHandler = (state: typeof State.State, error: NodeError) => {
+const myHandler = (state, error: NodeError) => {
   console.log(`Node ${error.node} failed with: ${error.error.message}`);
-  return new Command({
-    update: { status: "recovered" },
-    goto: "nextStep",
-  });
+  return new Command({ update: { status: "recovered" }, goto: "nextStep" });
 };
 ```
-
-@[`NodeError`] is a class with two fields:
-
-| Attribute | Type | Description |
-| --------- | ---- | ----------- |
-| `node` | `string` | Name of the node whose execution failed. |
-| `error` | `Error` | The exception thrown by the failed node. |
-
-The `error: NodeError` parameter is opt-in. Handlers that don't need failure context can omit the second argument and accept only `state`.
 :::
 
-### Route with Command
+如果 Handler 不需要 Error Context，也可以只接收 `state`。
 
-Error handlers can return a @[`Command`] to update state and route to a specific node, enabling Saga / compensation patterns:
+### 使用 `Command` 路由到补偿流程
 
-:::python
-```python
-from langgraph.errors import NodeError
-from langgraph.types import Command, RetryPolicy
-from langgraph.graph import StateGraph, START
-from typing_extensions import TypedDict
+典型 Saga 模式：库存已预留、支付失败，此时 Error Handler 更新 State 并跳转到 `finalize` / `refund` / `release_inventory` 等补偿节点，而不是让整个 Graph Abort。
 
-class State(TypedDict):
-    status: str
+Retry 与 Handler 可以独立配置。例如，支付只对 `ConnectionError` 重试三次；如果不是可重试错误，或者三次都失败，则立即进入补偿 Handler。
 
-def reserve_inventory(state: State) -> State:
-    return {"status": "reserved"}
+### Resume-safe Failure
 
-def charge_payment(state: State) -> State:
-    raise RuntimeError("payment timeout")
+Failure Provenance 也会进入 Checkpoint。如果 Node 已失败，但 Handler 尚未执行完成时进程崩溃或 Graph 被中断，恢复后 Handler 仍会收到相同的 `NodeError` 上下文。
 
-def payment_error_handler(state: State, error: NodeError) -> Command:
-    return Command(
-        update={"status": f"compensated_after_{error.node}: {error.error}"},
-        goto="finalize",
-    )
-
-def finalize(state: State) -> State:
-    return state
-
-graph = (
-    StateGraph(State)
-    .add_node("reserve_inventory", reserve_inventory)
-    .add_node(
-        "charge_payment",
-        charge_payment,
-        retry_policy=RetryPolicy(max_attempts=3, retry_on=ConnectionError),
-        error_handler=payment_error_handler,
-    )
-    .add_node("finalize", finalize)
-    .add_edge(START, "reserve_inventory")
-    .add_edge("reserve_inventory", "charge_payment")
-    .compile()
-)
-```
-
-`charge_payment` retries on `ConnectionError` up to 3 times. If retries are exhausted (or the error isn't a `ConnectionError`), the handler compensates by updating state and routing to `finalize` instead of aborting the graph.
-:::
-
-:::js
-```typescript
-import {
-  StateGraph,
-  StateSchema,
-  START,
-  Command,
-  NodeError,
-} from "@langchain/langgraph";
-import * as z from "zod";
-
-class ConnectionError extends Error {}
-
-const State = new StateSchema({
-  status: z.string(),
-});
-
-const reserveInventory = () => ({ status: "reserved" });
-
-const chargePayment = () => {
-  throw new Error("payment timeout");
-};
-
-const paymentErrorHandler = (
-  state: typeof State.State,
-  error: NodeError
-) =>
-  new Command({
-    update: {
-      status: `compensated_after_${error.node}: ${error.error.message}`,
-    },
-    goto: "finalize",
-  });
-
-const finalize = (state: typeof State.State) => state;
-
-const graph = new StateGraph(State)
-  .addNode("reserveInventory", reserveInventory)
-  .addNode("chargePayment", chargePayment, {
-    retryPolicy: {
-      maxAttempts: 3,
-      retryOn: (err) => err instanceof ConnectionError,
-    },
-    errorHandler: paymentErrorHandler,
-  })
-  .addNode("finalize", finalize)
-  .addEdge(START, "reserveInventory")
-  .addEdge("reserveInventory", "chargePayment")
-  .compile();
-```
-
-`chargePayment` retries on `ConnectionError` up to 3 times. If retries are exhausted (or the error isn't a `ConnectionError`), the handler compensates by updating state and routing to `finalize` instead of aborting the graph.
-:::
-
-### Resume-safe failures
-
-<Note>
-Failure provenance is checkpointed. If the graph is interrupted or the process crashes after a node fails but before the handler completes, the handler sees the same `NodeError` context when the graph resumes from its checkpoint.
-</Note>
-
-### Behavior with `interrupt()`
+### 与 `interrupt()` 的关系
 
 <Warning>
-`interrupt()` raised inside a node is **not** routed to the error handler. Interrupts use the `GraphBubbleUp` mechanism to pause graph execution for human-in-the-loop workflows, bypassing both retry policies and error handlers. The graph pauses as usual.
+Node 内的 `interrupt()` **不会**进入 Error Handler。Interrupt 使用 `GraphBubbleUp` 机制暂停 Graph，用于人在回路流程，会绕过 Retry Policy 和 Error Handler。
 </Warning>
 
-### Subgraph failures
+### Subgraph Failure
 
-If a node wraps a subgraph and the subgraph raises an unhandled exception, that exception surfaces to the parent node. If the parent node has an error handler, the handler fires with the subgraph's exception in `error.error`.
+如果 Parent Node 调用 Subgraph，而 Subgraph 抛出了未处理异常，该异常会向上冒泡到 Parent Node。如果 Parent Node 配置了 Error Handler，那么 Handler 中的 `error.error` 就是来自 Subgraph 的异常。
+
+## Graph Defaults
 
 :::python
-
-## Graph defaults
-
 <Note>
-Requires `langgraph>=1.2`.
+需要 `langgraph>=1.2`。
 </Note>
 
-Instead of repeating the same `retry_policy=`, `error_handler=`, `timeout=`, or `cache_policy=` on every `add_node` call, use @[`set_node_defaults`] to configure graph-wide defaults in one place:
+如果大量 Node 使用相同的 Retry、Handler、Timeout 或 Cache Policy，可以通过 @[`set_node_defaults`] 配置 Graph-wide Default，而不必在每个 `add_node` 中重复：
 
 ```python
 from langgraph.errors import NodeError
 from langgraph.types import RetryPolicy, TimeoutPolicy
-from langgraph.graph import StateGraph, START
-from typing_extensions import TypedDict
 
-class State(TypedDict):
-    status: str
 
 def default_error_handler(state: State, error: NodeError) -> State:
     return {"status": f"handled: {error.error}"}
@@ -894,125 +422,14 @@ graph = (
     .compile()
 )
 ```
-
-Both `step_a` and `step_b` now share the same retry policy, error handler, and timeout without any duplication.
-
-### Precedence
-
-Per-node values passed directly to `add_node()` always override the defaults set by `set_node_defaults()`. Defaults are resolved at `compile()` time, so you can call `set_node_defaults()` before or after `add_node()` in any order:
-
-```python
-graph = (
-    StateGraph(State)
-    .set_node_defaults(error_handler=default_error_handler)
-    .add_node("step_a", step_a)                                     # uses default_error_handler
-    .add_node("step_b", step_b, error_handler=custom_error_handler) # uses custom_error_handler
-    .add_edge(START, "step_a")
-    .compile()
-)
-```
-
-### Default error handler
-
-The `error_handler` default is particularly valuable when every graph run maps to an external process (for example a background job row) and any unhandled node failure should mark that process as failed, without repeating `error_handler=` on every `add_node`. Per-node handlers still take precedence when a step needs its own logic:
-
-```python
-from langgraph.errors import NodeError
-from langgraph.graph import StateGraph, START
-from langgraph.types import Command, RetryPolicy
-from typing_extensions import TypedDict
-
-class State(TypedDict):
-    process_id: str
-    status: str
-
-def fetch_data(state: State) -> State:
-    return {"status": "fetched"}
-
-def charge_payment(state: State) -> State:
-    raise RuntimeError("payment timeout")
-
-def finalize(state: State) -> State:
-    return state
-
-def mark_process_failed(state: State, error: NodeError) -> State:
-    # Persist failure on the external process row keyed by process_id.
-    return {"status": f"failed at {error.node}: {error.error}"}
-
-def refund_payment(state: State, error: NodeError) -> Command:
-    return Command(
-        update={"status": f"compensated after {error.node}"},
-        goto="finalize",
-    )
-
-graph = (
-    StateGraph(State)
-    .set_node_defaults(
-        retry_policy=RetryPolicy(max_attempts=3),
-        error_handler=mark_process_failed,
-    )
-    .add_node("fetch_data", fetch_data)  # uses mark_process_failed
-    .add_node(
-        "charge_payment",
-        charge_payment,
-        error_handler=refund_payment,  # overrides the graph-wide default
-    )
-    .add_node("finalize", finalize)
-    .add_edge(START, "fetch_data")
-    .add_edge("fetch_data", "charge_payment")
-    .compile()
-)
-```
-
-If `fetch_data` fails after retries, `mark_process_failed` runs. If `charge_payment` fails after retries, `refund_payment` runs instead because the per-node handler overrides the default.
-
-The handler accepts the same `(state, error: NodeError)` signature described in [Error handling](#error-handling). It also accepts `RunnableConfig` as an optional third argument if you need access to config values such as `thread_id`:
-
-```python
-from langchain_core.runnables import RunnableConfig
-
-def mark_process_failed(
-    state: State, error: NodeError, config: RunnableConfig
-) -> State:
-    thread_id = config["configurable"].get("thread_id")
-    return {"status": f"failed on thread {thread_id}: {error.error}"}
-```
-
-### Applicability matrix
-
-Not all defaults apply to all node types. Error-handler nodes (those registered via `add_node(error_handler=...)`) are excluded from certain defaults to prevent unsafe behavior:
-
-| `set_node_defaults` parameter | Applies to regular nodes | Applies to error-handler nodes | Reason |
-| ----------------------------- | ------------------------ | ------------------------------ | ------ |
-| `retry_policy` | ✅ | ✅ | Handlers should be retried on transient failures |
-| `timeout` | ✅ | ✅ | Stuck handlers should be cancelled like stuck regular nodes |
-| `error_handler` | ✅ | ❌ | Handlers must never catch themselves |
-| `cache_policy` | ✅ | ❌ | Caching handler results is unsafe |
-
-### Scope
-
-Defaults set on a parent graph are **not** inherited by subgraphs. Each graph maintains its own defaults.
-
 :::
 
 :::js
-
-## Graph defaults
-
 <Note>
-Requires `@langchain/langgraph>=1.4.0`.
+需要 `@langchain/langgraph>=1.4.0`。
 </Note>
 
-Instead of repeating the same `retryPolicy`, `errorHandler`, `timeout`, or `cachePolicy` on every `addNode` call, use [`setNodeDefaults`](https://reference.langchain.com/javascript/langchain-langgraph/index/StateGraph#member-setNodeDefaults) to configure graph-wide defaults in one place:
-
 ```typescript
-import { StateGraph, START, NodeError } from "@langchain/langgraph";
-
-const defaultErrorHandler = (
-  state: typeof State.State,
-  error: NodeError
-) => ({ status: `handled: ${error.error.message}` });
-
 const graph = new StateGraph(State)
   .setNodeDefaults({
     retryPolicy: { maxAttempts: 3 },
@@ -1025,83 +442,33 @@ const graph = new StateGraph(State)
   .addEdge(START, "stepA")
   .compile();
 ```
-
-Both `stepA` and `stepB` now share the same retry policy, error handler, timeout, and cache policy without any duplication.
-
-### Precedence
-
-Per-node values passed directly to `addNode()` always override defaults set by `setNodeDefaults()`. Defaults are resolved at `compile()` time, so you can call `setNodeDefaults()` before or after `addNode()` in any order:
-
-```typescript
-import { StateGraph, START } from "@langchain/langgraph";
-
-const graph = new StateGraph(State)
-  .setNodeDefaults({ errorHandler: defaultErrorHandler })
-  .addNode("stepA", stepA) // uses defaultErrorHandler
-  .addNode("stepB", stepB, { errorHandler: customErrorHandler }) // overrides default
-  .addEdge(START, "stepA")
-  .compile();
-```
-
-### Default error handler
-
-The `errorHandler` default is particularly valuable when every graph run maps to an external process (for example a background job row) and any unhandled node failure should mark that process as failed, without repeating `errorHandler` on every `addNode`. Per-node handlers still take precedence when a step needs its own compensation logic:
-
-```typescript
-import { Command, NodeError, StateGraph, START } from "@langchain/langgraph";
-
-const markProcessFailed = (
-  state: typeof State.State,
-  error: NodeError
-) => {
-  // Persist failure on the external process row keyed by processId.
-  return { status: `failed at ${error.node}: ${error.error.message}` };
-};
-
-const refundPayment = (state: typeof State.State, error: NodeError) =>
-  new Command({
-    update: { status: `compensated after ${error.node}` },
-    goto: "finalize",
-  });
-
-const graph = new StateGraph(State)
-  .setNodeDefaults({
-    retryPolicy: { maxAttempts: 3 },
-    errorHandler: markProcessFailed,
-  })
-  .addNode("fetchData", fetchData) // uses markProcessFailed
-  .addNode("chargePayment", chargePayment, {
-    errorHandler: refundPayment, // overrides the graph-wide default
-  })
-  .addNode("finalize", finalize)
-  .addEdge(START, "fetchData")
-  .addEdge("fetchData", "chargePayment")
-  .compile();
-```
-
-If `fetchData` fails after retries, `markProcessFailed` runs. If `chargePayment` fails after retries, `refundPayment` runs instead because the per-node handler overrides the default.
-
-### Applicability matrix
-
-Not all defaults apply to all node types. Error-handler nodes (those registered via `addNode(..., { errorHandler })`) are excluded from certain defaults to prevent unsafe behavior:
-
-| `setNodeDefaults` parameter | Applies to regular nodes | Applies to error-handler nodes | Reason |
-| ----------------------------- | ------------------------ | ------------------------------ | ------ |
-| `retryPolicy` | ✅ | ✅ | Handlers should be retried on transient failures |
-| `timeout` | ✅ | ✅ | Stuck handlers should be cancelled like stuck regular nodes |
-| `errorHandler` | ✅ | ❌ | Handlers must never catch themselves |
-| `cachePolicy` | ✅ | ❌ | Caching handler results is unsafe |
-
-### Scope
-
-Defaults set on a parent graph are **not** inherited by subgraphs. Each graph maintains its own defaults.
-
 :::
+
+### 优先级
+
+Node 自己在 `add_node` / `addNode` 上配置的值永远覆盖 Graph Default。Default 在 `compile()` 时解析，因此 `set_node_defaults` 可以写在添加 Node 之前或之后。
+
+### 默认 Error Handler
+
+当每个 Graph Run 对应一个外部 Process，例如后台任务表的一行，Graph-wide Default Error Handler 特别有价值：所有未处理的 Node Failure 都可以统一把外部 Process 标记为失败，而不必在每个 Node 上重复 Handler。
+
+某些高风险 Node 仍然可以单独覆盖 Default，例如 `charge_payment` 使用退款补偿 Handler，而普通 Node 使用统一的 `mark_process_failed`。
+
+### 适用矩阵
+
+| Default 参数 | 普通 Node | Error-handler Node | 原因 |
+| --- | --- | --- | --- |
+| `retry_policy` / `retryPolicy` | ✅ | ✅ | Handler 的瞬时失败也可以重试 |
+| `timeout` | ✅ | ✅ | 卡死的 Handler 同样需要取消 |
+| `error_handler` / `errorHandler` | ✅ | ❌ | Handler 不能捕获自己 |
+| `cache_policy` / `cachePolicy` | ✅ | ❌ | 缓存 Handler Result 不安全 |
+
+Graph Default **不会被 Subgraph 继承**。每张图独立维护自己的 Default。
 
 ## Functional API
 
 :::python
-The same `timeout=` and `retry_policy=` parameters are available on `@task` and `@entrypoint` in the functional API:
+Functional API 的 `@task` 与 `@entrypoint` 同样支持 Timeout；Task 还支持 Retry Policy：
 
 ```python
 from langgraph.func import entrypoint, task
@@ -1120,16 +487,10 @@ async def my_workflow(inputs: dict) -> str:
     result = await call_api("https://api.example.com/data")
     return result
 ```
-
-The behavior is identical to `add_node`: `NodeTimeoutError` is raised on timeout, buffered writes are cleared, and the retry policy decides whether to retry.
 :::
 
 :::js
-The `timeout` option is available on `task` and `entrypoint`; `task` also accepts a `retry` option (not `retryPolicy`):
-
 ```typescript
-import { entrypoint, task } from "@langchain/langgraph";
-
 const callApi = task(
   {
     name: "callApi",
@@ -1144,25 +505,21 @@ const callApi = task(
 
 const myWorkflow = entrypoint(
   { name: "myWorkflow", timeout: 60_000 },
-  async (inputs: { url: string }) => {
-    return await callApi(inputs.url);
-  }
+  async (inputs: { url: string }) => await callApi(inputs.url)
 );
 ```
 
-The behavior matches `addNode`: `NodeTimeoutError` is raised on timeout, buffered writes are cleared, and the retry policy decides whether to retry. Error handlers are not available on `task` / `entrypoint` in the JavaScript/TypeScript SDK—use `StateGraph.addNode(..., { errorHandler })` instead.
+JS / TS 的 `task` / `entrypoint` 目前不提供 Error Handler；需要补偿逻辑时使用 `StateGraph.addNode(..., { errorHandler })`。
 :::
 
-## Graceful shutdown
+## Graceful Shutdown
 
-Cooperative shutdown lets you stop an in-flight graph run after the current superstep completes and save a resumable checkpoint. This is useful for handling SIGTERM signals or any external supervisor that needs to reclaim resources without losing work.
+Cooperative Shutdown 允许外部 Supervisor 请求当前 Run **在当前 Super-step 完成后停止**，并保存一个可恢复 Checkpoint。这非常适合处理 SIGTERM、Pod Eviction 或 Worker 回收：尽量不丢失已经完成的工作。
 
 :::python
 <Note>
-Requires `langgraph>=1.2`.
+需要 `langgraph>=1.2`。
 </Note>
-
-Create a @[`RunControl`] and pass it as `control=` to `invoke` or `stream`. Call `request_drain()` from any thread to signal that the run should stop:
 
 ```python
 from langgraph.runtime import RunControl
@@ -1170,39 +527,32 @@ from langgraph.errors import GraphDrained
 
 control = RunControl()
 
-# In a signal handler or supervisor:
+# From a signal handler or supervisor:
 # control.request_drain("sigterm")
 
 try:
     result = graph.invoke(inputs, config, control=control)
 except GraphDrained as e:
-    # The graph stopped early and saved a checkpoint.
-    # Resume later with the same config.
     print(f"Drained: {e.reason}")
+    # Resume later with the same config
 ```
 :::
 
 :::js
 <Note>
-Requires `@langchain/langgraph>=1.4.0`.
+需要 `@langchain/langgraph>=1.4.0`。
 </Note>
-
-Create a @[`RunControl`] and pass it as `control` to `invoke` or `stream`. Call `requestDrain()` from any context to signal that the run should stop:
 
 ```typescript
 import { RunControl, GraphDrained } from "@langchain/langgraph";
 
 const control = new RunControl();
-
-// In a signal handler or supervisor:
 // control.requestDrain("sigterm");
 
 try {
   const result = await graph.invoke(inputs, { ...config, control });
 } catch (e) {
   if (e instanceof GraphDrained) {
-    // The graph stopped early and saved a checkpoint.
-    // Resume later with the same config.
     console.log(`Drained: ${e.reason}`);
   } else {
     throw e;
@@ -1211,34 +561,22 @@ try {
 ```
 :::
 
-### Semantics
+### Drain 语义
 
-Drain is cooperative and operates between supersteps, never preempting work that is already running:
+Drain 是**协作式**的，只在 Super-step Boundary 生效，不会抢占正在运行的 Node：
 
-:::python
-| Scenario | Behavior |
-| -------- | -------- |
-| Node mid-execution | Runs to completion. Drain takes effect on the next superstep. |
-| Node with a retry policy currently retrying | Retry loop runs to exhaustion or success. Drain takes effect after. |
-| Graph finishes naturally on the same tick as drain | Returns normally. Inspect `control.drain_requested` to distinguish from a normal run. |
-| More supersteps remain | Raises `GraphDrained(reason)`. Checkpoint is saved and resumable. |
-| Subgraph requests drain | `GraphDrained` bubbles up through the parent and stops it at its own next superstep boundary. |
-:::
+| 场景 | 行为 |
+| --- | --- |
+| Node 正在执行 | Node 正常完成；下一 Super-step 前 Drain 生效 |
+| Node 正处于 Retry Loop | Retry 继续直到成功或耗尽，然后 Drain |
+| Graph 恰好在同一 Tick 自然结束 | 正常返回，可通过 `drain_requested` / `drainRequested` 区分 |
+| 后续仍有 Super-step | 抛出 `GraphDrained(reason)`；已保存可恢复 Checkpoint |
+| Subgraph 请求 Drain | `GraphDrained` 向 Parent 冒泡，Parent 在自己的下一 Super-step Boundary 停止 |
 
-:::js
-| Scenario | Behavior |
-| -------- | -------- |
-| Node mid-execution | Runs to completion. Drain takes effect on the next superstep. |
-| Node with a retry policy currently retrying | Retry loop runs to exhaustion or success. Drain takes effect after. |
-| Graph finishes naturally on the same tick as drain | Returns normally. Inspect `control.drainRequested` to distinguish from a normal run. |
-| More supersteps remain | Raises `GraphDrained(reason)`. Checkpoint is saved and resumable. |
-| Subgraph requests drain | `GraphDrained` bubbles up through the parent and stops it at its own next superstep boundary. |
-:::
-
-### Resume after drain
+### Drain 后恢复
 
 :::python
-Resume a drained run with `invoke(None, config)` using the same `thread_id`:
+使用相同 `thread_id` 调用：
 
 ```python
 result = graph.invoke(None, config)
@@ -1246,16 +584,14 @@ result = graph.invoke(None, config)
 :::
 
 :::js
-Resume a drained run with `invoke(null, config)` using the same `thread_id`:
-
 ```typescript
 const result = await graph.invoke(null, config);
 ```
 :::
 
-### Read drain state inside a node
+### Node 内感知 Drain
 
-Access drain state through the `runtime` parameter to adjust node behavior before the superstep boundary is reached:
+Node 可以从 Runtime 读取 Drain State，在真正到达 Super-step Boundary 前主动跳过昂贵工作：
 
 :::python
 ```python
@@ -1263,7 +599,6 @@ from langgraph.runtime import Runtime
 
 async def my_node(state: State, runtime: Runtime) -> State:
     if runtime.drain_requested:
-        # Skip expensive work and return a minimal result
         return {"status": "skipped", "reason": runtime.drain_reason}
     return {"status": await do_work()}
 ```
@@ -1271,11 +606,8 @@ async def my_node(state: State, runtime: Runtime) -> State:
 
 :::js
 ```typescript
-import { type Runtime } from "@langchain/langgraph";
-
-const myNode = async (state: typeof State.State, runtime: Runtime<typeof State>) => {
+const myNode = async (state, runtime) => {
   if (runtime.control?.drainRequested) {
-    // Skip expensive work and return a minimal result
     return { status: "skipped", reason: runtime.control.drainReason };
   }
   return { status: await doWork() };
@@ -1283,9 +615,7 @@ const myNode = async (state: typeof State.State, runtime: Runtime<typeof State>)
 ```
 :::
 
-### SIGTERM hook pattern
-
-The recommended pattern for handling process shutdown:
+### SIGTERM 模式
 
 :::python
 ```python
@@ -1300,11 +630,10 @@ try:
     result = graph.invoke(inputs, config, control=control)
 except GraphDrained as e:
     log.info("graph drained: %s", e.reason)
-    # Resume on next startup with the same config
 ```
 
 <Note>
-`request_drain()` does not cancel running asyncio tasks or kill threads. For a hard upper bound, pair drain with a graceful timeout and task cancellation.
+`request_drain()` 不会强制取消正在运行的 Async Task 或杀死 Thread。如果还需要硬上限，应结合 Graceful Timeout 与任务取消机制。
 </Note>
 :::
 
@@ -1321,32 +650,29 @@ try {
 } catch (e) {
   if (e instanceof GraphDrained) {
     console.log(`graph drained: ${e.reason}`);
-    // Resume on next startup with the same config
   } else {
     throw e;
   }
 }
 ```
-:::
 
-:::js
 <Note>
-`requestDrain()` does not cancel in-flight async work. For a hard upper bound, pair drain with a graceful timeout and an `AbortSignal`.
+`requestDrain()` 不会自动取消正在执行的 Async Work；如果需要硬上限，可结合 Graceful Timeout 与 `AbortSignal`。
 </Note>
 :::
 
-## Limitations
+## 限制
 
 :::python
-- **Timeouts are async-only**: sync nodes with a `timeout` are rejected at compile time.
-- **One handler per node**: each node can have at most one `error_handler`.
-- **Handler failures bubble up**: if the error handler itself raises, that exception propagates as if the node had no handler.
-- **`set_node_defaults` is not inherited by subgraphs**: each graph manages its own defaults independently.
+- **Timeout 仅支持 Async Node**：Sync Node 配置 `timeout` 会在编译时被拒绝。
+- **每个 Node 最多一个 Error Handler**。
+- **Handler 自己失败时异常会继续向上冒泡**，行为等价于没有 Handler。
+- **`set_node_defaults` 不会被 Subgraph 继承**。
 :::
 
 :::js
-- **`setNodeDefaults` is not inherited by subgraphs**: each graph manages its own defaults independently.
-- **Error handlers are `StateGraph`-only**: pass `errorHandler` to `StateGraph.addNode`, not the base `Graph` class. Error handlers are not available on `task` / `entrypoint`.
-- **One handler per node**: each node can have at most one `errorHandler`.
-- **Handler failures bubble up**: if the error handler itself throws, that exception propagates as if the node had no handler.
+- **`setNodeDefaults` 不会被 Subgraph 继承**。
+- **Error Handler 仅支持 `StateGraph` Node**，不适用于基础 `Graph`、`task` 或 `entrypoint`。
+- **每个 Node 最多一个 Error Handler**。
+- **Handler 自身抛错时异常会继续冒泡**。
 :::
