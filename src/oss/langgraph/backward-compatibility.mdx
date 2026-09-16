@@ -1,6 +1,6 @@
 ---
 title: 向后兼容
- description: 在生产环境中更新 LangGraph 图代码，同时不破坏正在执行中的 Run。
+description: 在生产环境中更新 LangGraph 图代码，同时不破坏正在执行中的 Run。
 ---
 
 生产环境中的软件必然需要变化。新需求、Bug 修复和重构最终都会进入你的图代码。由于 LangGraph 会使用最新部署的图，去处理已有线程已经[持久化](/oss/langgraph/persistence)的状态，因此从现有 Checkpoint 的角度看，你发布的每一次变更，本质上都相当于一次需要保持向后兼容的 API 变更。
