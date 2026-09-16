@@ -1,39 +1,41 @@
 ---
-title: Checkpointers
-description: LangGraph checkpointers save graph state as checkpoints at each step, enabling persistence, human-in-the-loop, and fault-tolerant execution.
+title: Checkpointer
+sidebarTitle: Checkpointer
+description: LangGraph Checkpointer 会在每个执行步骤保存图状态检查点，从而支持持久化、人在回路与容错执行。
 ---
 
-A checkpointer saves a snapshot of graph state at each super-step, organized into **threads**. Compile a graph with a checkpointer to enable human-in-the-loop workflows, time travel debugging, fault-tolerant execution, and conversational memory.
+Checkpointer 会在每个 **Super-step（超步）**保存一份 Graph State Snapshot，并按 **Thread（线程）**组织这些检查点。使用 Checkpointer 编译图后，就可以实现人在回路、时间旅行调试、故障恢复以及对话记忆。
 
 ![Checkpoints](/oss/images/checkpoints.jpg)
 
 <Info>
-**Agent Server handles checkpointing automatically**
-When using the [Agent Server](/langsmith/agent-server), you do not need to implement or configure checkpointers manually. The server handles all persistence infrastructure for you behind the scenes.
+**Agent Server 会自动处理 Checkpoint**
+
+使用 [Agent Server](/langsmith/agent-server) 时，无需手动实现或配置 Checkpointer。服务器会在后台处理持久化基础设施。
 </Info>
 
 <Tip>
-Trace checkpointed state and debug how your agent resumes across sessions with [LangSmith](https://smith.langchain.com). Follow the [tracing quickstart](/langsmith/trace-with-langgraph) to get set up.
+可以使用 [LangSmith](https://smith.langchain.com) 追踪 Checkpoint State，并调试智能体如何跨会话恢复执行。参阅 [Tracing 快速入门](/langsmith/trace-with-langgraph)。
 </Tip>
 
-## Why use checkpointers
+## 为什么需要 Checkpointer
 
-Checkpointers are required for the following features:
+以下功能依赖 Checkpointer：
 
-- **Human-in-the-loop**: Checkpointers facilitate [human-in-the-loop workflows](/oss/langgraph/interrupts) by allowing humans to inspect, interrupt, and approve graph steps. Checkpointers are needed for these workflows as the person has to be able to view the state of a graph at any point in time, and the graph has to be able to resume execution after the person has made any updates to the state. See [Interrupts](/oss/langgraph/interrupts) for examples.
-- **Memory**: Checkpointers allow for ["memory"](/oss/concepts/memory) between interactions. In the case of repeated human interactions (like conversations) any follow up messages can be sent to that thread, which will retain its memory of previous ones. See [Add memory](/oss/langgraph/add-memory) for information on how to add and manage conversation memory using checkpointers.
-- **Time travel**: Checkpointers allow for ["time travel"](/oss/langgraph/use-time-travel), allowing users to replay prior graph executions to review and / or debug specific graph steps. In addition, checkpointers make it possible to fork the graph state at arbitrary checkpoints to explore alternative trajectories.
-- **Fault-tolerance**: Checkpointing provides fault-tolerance and error recovery: if one or more nodes fail at a given superstep, you can restart your graph from the last successful step.
+- **人在回路**：允许人工检查、暂停、审批和修改 Graph State；修改完成后，图可以从保存的状态继续执行。参阅[中断](/oss/langgraph/interrupts)。
+- **记忆**：同一 Thread 中后续交互可以继续使用此前保存的状态，从而形成对话记忆。参阅[添加记忆](/oss/langgraph/add-memory)。
+- **时间旅行**：可以重放以前的执行、检查某个 Graph Step，或者从任意 Checkpoint Fork 出另一条执行路径。参阅[时间旅行](/oss/langgraph/use-time-travel)。
+- **容错**：如果某个 Super-step 中的一个或多个 Node 失败，可以从上一个成功的 Checkpoint 恢复。
 <a id="pending-writes"></a>
-- **Pending writes**: When a graph node fails mid-execution at a given [super-step](#super-steps), LangGraph stores pending checkpoint writes from any other nodes that completed successfully at that super-step. When you resume graph execution from that super-step you don't re-run the successful nodes.
+- **Pending Writes**：如果同一个 Super-step 中某个 Node 失败，而其他 Node 已成功执行，LangGraph 会保存这些成功 Node 的中间写入。恢复时不必重复运行已经成功的 Node。
 
-## Core concepts
+## 核心概念
 
-### Threads
+### Thread
 
-A thread is a unique ID or thread identifier assigned to each checkpoint saved by a checkpointer. It contains the accumulated state of a sequence of [runs](/langsmith/runs). When a run is executed, the [state](/oss/langgraph/graph-api#state) of the underlying graph of the assistant will be persisted to the thread.
+Thread 是用于组织一系列 Run 的持久化执行上下文。Checkpointer 保存的每个 Checkpoint 都属于某个 `thread_id`。
 
-When invoking a graph with a checkpointer, you **must** specify a `thread_id` as part of the `configurable` portion of the config:
+使用带 Checkpointer 的图时，必须在 Config 的 `configurable` 中指定 `thread_id`：
 
 :::python
 ```python
@@ -51,25 +53,21 @@ When invoking a graph with a checkpointer, you **must** specify a `thread_id` as
 ```
 :::
 
-A thread's current and historical state can be retrieved. To persist state, a thread must be created prior to executing a run. The LangSmith API provides several endpoints for creating and managing threads and thread state. See the [API reference](https://reference.langchain.com/python/langsmith/) for more details.
+Checkpointer 使用 `thread_id` 作为保存和加载 Checkpoint 的主索引。如果没有 `thread_id`，就无法持久化 State，也无法在 [Interrupt](/oss/langgraph/interrupts) 后恢复执行。
 
-The checkpointer uses `thread_id` as the primary key for storing and retrieving checkpoints. Without it, the checkpointer cannot save state or resume execution after an [interrupt](/oss/langgraph/interrupts), since the checkpointer uses `thread_id` to load the saved state.
+### Checkpoint
 
-### Checkpoints
+Thread 在某一时刻的 State 称为 **Checkpoint**。LangGraph 在每个 [Super-step](#super-steps) 边界保存一份 Graph State Snapshot，并通过 `StateSnapshot` 表示。
 
-The state of a thread at a particular point in time is called a checkpoint. A checkpoint is a snapshot of the graph state saved at each [super-step](#super-steps) and is represented by a `StateSnapshot` object (see [StateSnapshot fields](#statesnapshot-fields) for the full field reference).
+#### Super-step
 
-#### Super-steps
+一个 Super-step 可以理解为 Graph Runtime 的一轮“Tick”：这一轮中被调度的所有 Node 都会执行，其中一些 Node 可能并行运行。对于 `START -> A -> B -> END` 这样的顺序图，Input、A 和 B 分别位于不同的 Super-step，因此每个阶段结束后都会形成 Checkpoint。
 
-LangGraph creates a checkpoint at each **super-step** boundary. A super-step is a single "tick" of the graph where all nodes scheduled for that step execute (potentially in parallel). For a sequential graph like `START -> A -> B -> END`, there are separate super-steps for the input, node A, and node B — producing a checkpoint after each one. Understanding super-step boundaries is important for [time travel](/oss/langgraph/use-time-travel), because you can only resume execution from a checkpoint (i.e., a super-step boundary).
+这对于[时间旅行](/oss/langgraph/use-time-travel)很重要：图只能从 Checkpoint，也就是 Super-step Boundary 恢复执行。
 
-In addition to super-step checkpoints, LangGraph also persists writes at the **node (task) level**. As each node within a super-step finishes, its outputs are written to the checkpointer's `checkpoint_writes` table as task entries linked to the in-progress checkpoint. These per-task writes are what enable [pending writes](#pending-writes) recovery: if another node in the same super-step fails, the successful nodes' writes are already durable and don't need to be re-run on resume. The full state snapshot is then committed once the super-step completes.
+除了完整的 Super-step Checkpoint，LangGraph 还会在 **Node / Task 粒度**保存 Write。某个 Node 完成后，它的输出就会写入 Checkpointer；因此同一 Super-step 中如果另一个并行 Node 失败，已成功 Node 的结果仍然是持久化的。这正是 [Pending Writes](#pending-writes) 容错机制的基础。
 
-LangGraph also persists writes from individual node executions within a super-step. These writes are stored as tasks and used for fault tolerance: if another node in the same super-step fails, successful node writes do not need to be recomputed when you resume. These task writes are not full `StateSnapshot` checkpoints, so time travel resumes from full checkpoints at super-step boundaries.
-
-Checkpoints are persisted and can be used to restore the state of a thread at a later time.
-
-Let's see what checkpoints are saved when a simple graph is invoked as follows:
+下面是一个简单示例：
 
 :::python
 ```python
@@ -89,7 +87,6 @@ def node_a(state: State):
 
 def node_b(state: State):
     return {"foo": "b", "bar": ["b"]}
-
 
 workflow = StateGraph(State)
 workflow.add_node(node_a)
@@ -123,12 +120,8 @@ const State = new StateSchema({
 });
 
 const workflow = new StateGraph(State)
-  .addNode("nodeA", (state) => {
-    return { foo: "a", bar: ["a"] };
-  })
-  .addNode("nodeB", (state) => {
-    return { foo: "b", bar: ["b"] };
-  })
+  .addNode("nodeA", (state) => ({ foo: "a", bar: ["a"] }))
+  .addNode("nodeB", (state) => ({ foo: "b", bar: ["b"] }))
   .addEdge(START, "nodeA")
   .addEdge("nodeA", "nodeB")
   .addEdge("nodeB", END);
@@ -141,36 +134,24 @@ await graph.invoke({ foo: "", bar: [] }, config);
 ```
 :::
 
-:::python
-After you run the graph, there will be exactly 4 checkpoints:
+这次执行会形成四个完整 Checkpoint：
 
-* Empty checkpoint with @[`START`] as the next node to be executed
-* Checkpoint with the user input `{'foo': '', 'bar': []}` and `node_a` as the next node to be executed
-* Checkpoint with the outputs of `node_a` `{'foo': 'a', 'bar': ['a']}` and `node_b` as the next node to be executed
-* Checkpoint with the outputs of `node_b` `{'foo': 'b', 'bar': ['a', 'b']}` and no next nodes to be executed
+1. 空 Checkpoint，下一步为 `START`。
+2. 保存用户 Input，下一步执行 `node_a`。
+3. 保存 `node_a` 输出，下一步执行 `node_b`。
+4. 保存 `node_b` 输出，且没有后续 Node，表示 Graph 完成。
 
-Note that the `bar` channel values contain outputs from both nodes because this example has a reducer for the `bar` channel.
-:::
+`bar` 最终会同时包含 `a` 与 `b`，因为该 Channel 配置了累加 Reducer。
 
-:::js
-After you run the graph, there will be exactly 4 checkpoints:
+#### Checkpoint Namespace
 
-* Empty checkpoint with @[`START`] as the next node to be executed
-* Checkpoint with the user input `{'foo': '', 'bar': []}` and `nodeA` as the next node to be executed
-* Checkpoint with the outputs of `nodeA` `{'foo': 'a', 'bar': ['a']}` and `nodeB` as the next node to be executed
-* Checkpoint with the outputs of `nodeB` `{'foo': 'b', 'bar': ['a', 'b']}` and no next nodes to be executed
+每个 Checkpoint 都包含 `checkpoint_ns`，用来标识它属于哪个 Graph / Subgraph：
 
-Note that the `bar` channel values contain outputs from both nodes because this example has a reducer for the `bar` channel.
-:::
+- `""`：根图。
+- `"node_name:uuid"`：作为某个 Node 调用的 Subgraph。
+- 嵌套 Subgraph 会通过 `|` 拼接多级 Namespace。
 
-#### Checkpoint namespace
-
-Each checkpoint has a `checkpoint_ns` (checkpoint namespace) field that identifies which graph or subgraph it belongs to:
-
-- **`""`** (empty string): The checkpoint belongs to the parent (root) graph.
-- **`"node_name:uuid"`**: The checkpoint belongs to a subgraph invoked as the given node. For nested subgraphs, namespaces are joined with `|` separators (e.g., `"outer_node:uuid|inner_node:uuid"`).
-
-You can access the checkpoint namespace from within a node via the config:
+Node 内可以从 Config 中获取 Namespace：
 
 :::python
 ```python
@@ -178,7 +159,6 @@ from langchain_core.runnables import RunnableConfig
 
 def my_node(state: State, config: RunnableConfig):
     checkpoint_ns = config["configurable"]["checkpoint_ns"]
-    # "" for the parent graph, "node_name:uuid" for a subgraph
 ```
 :::
 
@@ -188,338 +168,96 @@ import { RunnableConfig } from "@langchain/core/runnables";
 
 function myNode(state: typeof State.Type, config: RunnableConfig) {
   const checkpointNs = config.configurable?.checkpoint_ns;
-  // "" for the parent graph, "node_name:uuid" for a subgraph
 }
 ```
 :::
 
-See [Subgraphs](/oss/langgraph/use-subgraphs) for more details on working with subgraph state and checkpoints.
+更多信息参阅[子图](/oss/langgraph/use-subgraphs)。
 
-## Get and update state
+## 获取和更新 State
 
-### Get state
+### 获取当前 State
+
+与持久化 Graph State 交互时，必须指定 Thread ID。
 
 :::python
-When interacting with the saved graph state, you **must** specify a [thread identifier](#threads). You can view the _latest_ state of the graph by calling `graph.get_state(config)`. This will return a `StateSnapshot` object that corresponds to the latest checkpoint associated with the thread ID provided in the config or a checkpoint associated with a checkpoint ID for the thread, if provided.
-
 ```python
-# get the latest state snapshot
+# Latest checkpoint
 config = {"configurable": {"thread_id": "1"}}
 graph.get_state(config)
 
-# get a state snapshot for a specific checkpoint_id
-config = {"configurable": {"thread_id": "1", "checkpoint_id": "1ef663ba-28fe-6528-8002-5a559208592c"}}
+# Specific checkpoint
+config = {
+    "configurable": {
+        "thread_id": "1",
+        "checkpoint_id": "1ef663ba-28fe-6528-8002-5a559208592c"
+    }
+}
 graph.get_state(config)
 ```
 :::
 
 :::js
-When interacting with the saved graph state, you **must** specify a [thread identifier](#threads). You can view the _latest_ state of the graph by calling `graph.getState(config)`. This will return a `StateSnapshot` object that corresponds to the latest checkpoint associated with the thread ID provided in the config or a checkpoint associated with a checkpoint ID for the thread, if provided.
-
 ```typescript
-// get the latest state snapshot
 const config = { configurable: { thread_id: "1" } };
 await graph.getState(config);
 
-// get a state snapshot for a specific checkpoint_id
-const config = {
+const specificConfig = {
   configurable: {
     thread_id: "1",
     checkpoint_id: "1ef663ba-28fe-6528-8002-5a559208592c",
   },
 };
-await graph.getState(config);
+await graph.getState(specificConfig);
 ```
 :::
 
-:::python
-In this example, the output of `get_state` will look like this:
+返回值是 `StateSnapshot`。
 
-```
-StateSnapshot(
-    values={'foo': 'b', 'bar': ['a', 'b']},
-    next=(),
-    config={'configurable': {'thread_id': '1', 'checkpoint_ns': '', 'checkpoint_id': '1ef663ba-28fe-6528-8002-5a559208592c'}},
-    metadata={'source': 'loop', 'writes': {'node_b': {'foo': 'b', 'bar': ['b']}}, 'step': 2},
-    created_at='2024-08-29T19:19:38.821749+00:00',
-    parent_config={'configurable': {'thread_id': '1', 'checkpoint_ns': '', 'checkpoint_id': '1ef663ba-28f9-6ec4-8001-31981c2c39f8'}}, tasks=()
-)
-```
+### `StateSnapshot` 字段
+
+:::python
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `values` | `dict` | 当前 Checkpoint 中各 State Channel 的值。 |
+| `next` | `tuple[str, ...]` | 下一步要执行的 Node；空元组表示图已结束。 |
+| `config` | `dict` | 包含 `thread_id`、`checkpoint_ns`、`checkpoint_id`。 |
+| `metadata` | `dict` | 执行元数据，包括 `source`、Node `writes` 和 Super-step `step`。 |
+| `created_at` | `str` | Checkpoint 创建时间。 |
+| `parent_config` | `dict \| None` | 上一个 Checkpoint 的 Config。 |
+| `tasks` | `tuple[PregelTask, ...]` | 当前 Step 的 Task，包括名称、Error、Interrupt 和可选 Subgraph State。 |
 :::
 
 :::js
-In this example, the output of `getState` will look like this:
-
-```
-StateSnapshot {
-  values: { foo: 'b', bar: ['a', 'b'] },
-  next: [],
-  config: {
-    configurable: {
-      thread_id: '1',
-      checkpoint_ns: '',
-      checkpoint_id: '1ef663ba-28fe-6528-8002-5a559208592c'
-    }
-  },
-  metadata: {
-    source: 'loop',
-    writes: { nodeB: { foo: 'b', bar: ['b'] } },
-    step: 2
-  },
-  createdAt: '2024-08-29T19:19:38.821749+00:00',
-  parentConfig: {
-    configurable: {
-      thread_id: '1',
-      checkpoint_ns: '',
-      checkpoint_id: '1ef663ba-28f9-6ec4-8001-31981c2c39f8'
-    }
-  },
-  tasks: []
-}
-```
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `values` | `object` | 当前 Checkpoint 中各 State Channel 的值。 |
+| `next` | `string[]` | 下一步要执行的 Node；空数组表示图已结束。 |
+| `config` | `object` | 包含 `thread_id`、`checkpoint_ns`、`checkpoint_id`。 |
+| `metadata` | `object` | 执行元数据。 |
+| `createdAt` | `string` | Checkpoint 创建时间。 |
+| `parentConfig` | `object \| null` | 上一个 Checkpoint 的 Config。 |
+| `tasks` | `PregelTask[]` | 当前 Step 的 Task。 |
 :::
 
-#### StateSnapshot fields
+### 获取 State History
 
-:::python
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `values` | `dict` | State channel values at this checkpoint. |
-| `next` | `tuple[str, ...]` | Node names to execute next. Empty `()` means the graph is complete. |
-| `config` | `dict` | Contains `thread_id`, `checkpoint_ns`, and `checkpoint_id`. |
-| `metadata` | `dict` | Execution metadata. Contains `source` (`"input"`, `"loop"`, or `"update"`), `writes` (node outputs), and `step` (super-step counter). |
-| `created_at` | `str` | ISO 8601 timestamp of when this checkpoint was created. |
-| `parent_config` | `dict \| None` | Config of the previous checkpoint. `None` for the first checkpoint. |
-| `tasks` | `tuple[PregelTask, ...]` | Tasks to execute at this step. Each task has `id`, `name`, `error`, `interrupts`, and optionally `state` (subgraph snapshot, when using `subgraphs=True`). |
-
-:::
-
-:::js
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `values` | `object` | State channel values at this checkpoint. |
-| `next` | `string[]` | Node names to execute next. Empty `[]` means the graph is complete. |
-| `config` | `object` | Contains `thread_id`, `checkpoint_ns`, and `checkpoint_id`. |
-| `metadata` | `object` | Execution metadata. Contains `source` (`"input"`, `"loop"`, or `"update"`), `writes` (node outputs), and `step` (super-step counter). |
-| `createdAt` | `string` | ISO 8601 timestamp of when this checkpoint was created. |
-| `parentConfig` | `object \| null` | Config of the previous checkpoint. `null` for the first checkpoint. |
-| `tasks` | `PregelTask[]` | Tasks to execute at this step. Each task has `id`, `name`, `error`, `interrupts`, and optionally `state` (subgraph snapshot, when using `subgraphs: true`). |
-
-:::
-
-### Get state history
-
-:::python
-You can get the full history of the graph execution for a given thread by calling @[`graph.get_state_history(config)`][get_state_history]. This will return a list of `StateSnapshot` objects associated with the thread ID provided in the config. Importantly, the checkpoints will be ordered chronologically with the most recent checkpoint / `StateSnapshot` being the first in the list.
-
-```python
-config = {"configurable": {"thread_id": "1"}}
-list(graph.get_state_history(config))
-```
-:::
-
-:::js
-You can get the full history of the graph execution for a given thread by calling `graph.getStateHistory(config)`. This will return a list of `StateSnapshot` objects associated with the thread ID provided in the config. Importantly, the checkpoints will be ordered chronologically with the most recent checkpoint / `StateSnapshot` being the first in the list.
-
-```typescript
-const config = { configurable: { thread_id: "1" } };
-for await (const state of graph.getStateHistory(config)) {
-  console.log(state);
-}
-```
-:::
-
-:::python
-In this example, the output of @[`get_state_history`] will look like this:
-
-```
-[
-    StateSnapshot(
-        values={'foo': 'b', 'bar': ['a', 'b']},
-        next=(),
-        config={'configurable': {'thread_id': '1', 'checkpoint_ns': '', 'checkpoint_id': '1ef663ba-28fe-6528-8002-5a559208592c'}},
-        metadata={'source': 'loop', 'writes': {'node_b': {'foo': 'b', 'bar': ['b']}}, 'step': 2},
-        created_at='2024-08-29T19:19:38.821749+00:00',
-        parent_config={'configurable': {'thread_id': '1', 'checkpoint_ns': '', 'checkpoint_id': '1ef663ba-28f9-6ec4-8001-31981c2c39f8'}},
-        tasks=(),
-    ),
-    StateSnapshot(
-        values={'foo': 'a', 'bar': ['a']},
-        next=('node_b',),
-        config={'configurable': {'thread_id': '1', 'checkpoint_ns': '', 'checkpoint_id': '1ef663ba-28f9-6ec4-8001-31981c2c39f8'}},
-        metadata={'source': 'loop', 'writes': {'node_a': {'foo': 'a', 'bar': ['a']}}, 'step': 1},
-        created_at='2024-08-29T19:19:38.819946+00:00',
-        parent_config={'configurable': {'thread_id': '1', 'checkpoint_ns': '', 'checkpoint_id': '1ef663ba-28f4-6b4a-8000-ca575a13d36a'}},
-        tasks=(PregelTask(id='6fb7314f-f114-5413-a1f3-d37dfe98ff44', name='node_b', error=None, interrupts=()),),
-    ),
-    StateSnapshot(
-        values={'foo': '', 'bar': []},
-        next=('node_a',),
-        config={'configurable': {'thread_id': '1', 'checkpoint_ns': '', 'checkpoint_id': '1ef663ba-28f4-6b4a-8000-ca575a13d36a'}},
-        metadata={'source': 'loop', 'writes': None, 'step': 0},
-        created_at='2024-08-29T19:19:38.817813+00:00',
-        parent_config={'configurable': {'thread_id': '1', 'checkpoint_ns': '', 'checkpoint_id': '1ef663ba-28f0-6c66-bfff-6723431e8481'}},
-        tasks=(PregelTask(id='f1b14528-5ee5-579c-949b-23ef9bfbed58', name='node_a', error=None, interrupts=()),),
-    ),
-    StateSnapshot(
-        values={'bar': []},
-        next=('__start__',),
-        config={'configurable': {'thread_id': '1', 'checkpoint_ns': '', 'checkpoint_id': '1ef663ba-28f0-6c66-bfff-6723431e8481'}},
-        metadata={'source': 'input', 'writes': {'foo': ''}, 'step': -1},
-        created_at='2024-08-29T19:19:38.816205+00:00',
-        parent_config=None,
-        tasks=(PregelTask(id='6d27aa2e-d72b-5504-a36f-8620e54a76dd', name='__start__', error=None, interrupts=()),),
-    )
-]
-```
-:::
-
-:::js
-In this example, the output of `getStateHistory` will look like this:
-
-```
-[
-  StateSnapshot {
-    values: { foo: 'b', bar: ['a', 'b'] },
-    next: [],
-    config: {
-      configurable: {
-        thread_id: '1',
-        checkpoint_ns: '',
-        checkpoint_id: '1ef663ba-28fe-6528-8002-5a559208592c'
-      }
-    },
-    metadata: {
-      source: 'loop',
-      writes: { nodeB: { foo: 'b', bar: ['b'] } },
-      step: 2
-    },
-    createdAt: '2024-08-29T19:19:38.821749+00:00',
-    parentConfig: {
-      configurable: {
-        thread_id: '1',
-        checkpoint_ns: '',
-        checkpoint_id: '1ef663ba-28f9-6ec4-8001-31981c2c39f8'
-      }
-    },
-    tasks: []
-  },
-  StateSnapshot {
-    values: { foo: 'a', bar: ['a'] },
-    next: ['nodeB'],
-    config: {
-      configurable: {
-        thread_id: '1',
-        checkpoint_ns: '',
-        checkpoint_id: '1ef663ba-28f9-6ec4-8001-31981c2c39f8'
-      }
-    },
-    metadata: {
-      source: 'loop',
-      writes: { nodeA: { foo: 'a', bar: ['a'] } },
-      step: 1
-    },
-    createdAt: '2024-08-29T19:19:38.819946+00:00',
-    parentConfig: {
-      configurable: {
-        thread_id: '1',
-        checkpoint_ns: '',
-        checkpoint_id: '1ef663ba-28f4-6b4a-8000-ca575a13d36a'
-      }
-    },
-    tasks: [
-      PregelTask {
-        id: '6fb7314f-f114-5413-a1f3-d37dfe98ff44',
-        name: 'nodeB',
-        error: null,
-        interrupts: []
-      }
-    ]
-  },
-  StateSnapshot {
-    values: { foo: '', bar: [] },
-    next: ['node_a'],
-    config: {
-      configurable: {
-        thread_id: '1',
-        checkpoint_ns: '',
-        checkpoint_id: '1ef663ba-28f4-6b4a-8000-ca575a13d36a'
-      }
-    },
-    metadata: {
-      source: 'loop',
-      writes: null,
-      step: 0
-    },
-    createdAt: '2024-08-29T19:19:38.817813+00:00',
-    parentConfig: {
-      configurable: {
-        thread_id: '1',
-        checkpoint_ns: '',
-        checkpoint_id: '1ef663ba-28f0-6c66-bfff-6723431e8481'
-      }
-    },
-    tasks: [
-      PregelTask {
-        id: 'f1b14528-5ee5-579c-949b-23ef9bfbed58',
-        name: 'node_a',
-        error: null,
-        interrupts: []
-      }
-    ]
-  },
-  StateSnapshot {
-    values: { bar: [] },
-    next: ['__start__'],
-    config: {
-      configurable: {
-        thread_id: '1',
-        checkpoint_ns: '',
-        checkpoint_id: '1ef663ba-28f0-6c66-bfff-6723431e8481'
-      }
-    },
-    metadata: {
-      source: 'input',
-      writes: { foo: '' },
-      step: -1
-    },
-    createdAt: '2024-08-29T19:19:38.816205+00:00',
-    parentConfig: null,
-    tasks: [
-      PregelTask {
-        id: '6d27aa2e-d72b-5504-a36f-8620e54a76dd',
-        name: '__start__',
-        error: null,
-        interrupts: []
-      }
-    ]
-  }
-]
-```
-:::
-
-![State](/oss/images/get_state.jpg)
-
-#### Find a specific checkpoint
-
-You can filter the state history to find checkpoints matching specific criteria:
+使用 `get_state_history` / `getStateHistory` 可以读取一个 Thread 的历史 Checkpoint。历史通常按从新到旧的顺序返回。
 
 :::python
 ```python
 history = list(graph.get_state_history(config))
 
-# Find the checkpoint before a specific node executed
+# Find checkpoint before a node
 before_node_b = next(s for s in history if s.next == ("node_b",))
 
-# Find a checkpoint by step number
+# Find by step
 step_2 = next(s for s in history if s.metadata["step"] == 2)
 
-# Find checkpoints created by update_state
+# Find forks created by update_state
 forks = [s for s in history if s.metadata["source"] == "update"]
 
-# Find the checkpoint where an interrupt occurred
+# Find an interrupt checkpoint
 interrupted = next(
     s for s in history
     if s.tasks and any(t.interrupts for t in s.tasks)
@@ -529,21 +267,14 @@ interrupted = next(
 
 :::js
 ```typescript
-const history: StateSnapshot[] = [];
+const history = [];
 for await (const state of graph.getStateHistory(config)) {
   history.push(state);
 }
 
-// Find the checkpoint before a specific node executed
 const beforeNodeB = history.find((s) => s.next.includes("nodeB"));
-
-// Find a checkpoint by step number
 const step2 = history.find((s) => s.metadata.step === 2);
-
-// Find checkpoints created by updateState
 const forks = history.filter((s) => s.metadata.source === "update");
-
-// Find the checkpoint where an interrupt occurred
 const interrupted = history.find(
   (s) => s.tasks.length > 0 && s.tasks.some((t) => t.interrupts.length > 0)
 );
@@ -552,38 +283,27 @@ const interrupted = history.find(
 
 ### Replay
 
-Replay re-executes steps from a prior checkpoint. Invoke the graph with a prior `checkpoint_id` to re-run nodes after that checkpoint. Nodes before the checkpoint are skipped (their results are already saved). Nodes after the checkpoint re-execute, including any LLM calls, API requests, or [interrupts](/oss/langgraph/interrupts) — which are always re-triggered during replay.
+Replay 会从历史 Checkpoint 重新执行后续步骤。Checkpoint 之前的 Node 不会重新运行，因为其结果已保存；Checkpoint 之后的 Node 会重新执行，包括 LLM 调用、API 请求和 [Interrupt](/oss/langgraph/interrupts)。
 
-See [Time travel](/oss/langgraph/use-time-travel) for full details and code examples on replaying past executions.
+完整说明参阅[时间旅行](/oss/langgraph/use-time-travel)。
 
 ![Replay](/oss/images/re_play.png)
 
-### Update state
+### 更新 State
 
-:::python
-You can edit the graph state using @[`update_state`]. This creates a new checkpoint with the updated values — it does not modify the original checkpoint. The update is treated the same as a node update: values are passed through [reducer](/oss/langgraph/graph-api#reducers) functions when defined, so channels with reducers _accumulate_ values rather than overwrite them.
+`update_state` / `updateState` 会基于当前 Checkpoint 创建一个新的 Checkpoint，而不是原地修改历史。更新仍然会经过对应的 [Reducer](/oss/langgraph/graph-api#reducers)。因此，如果某个 Channel 使用累加 Reducer，新值会与旧值合并，而不是简单覆盖。
 
-You can optionally specify `as_node` to control which node the update is treated as coming from, which affects which node executes next. See [Time travel: `as_node`](/oss/langgraph/use-time-travel#from-a-specific-node) for details.
-:::
-
-:::js
-You can edit the graph state using `graph.updateState()`. This creates a new checkpoint with the updated values — it does not modify the original checkpoint. The update is treated the same as a node update: values are passed through [reducer](/oss/langgraph/graph-api#reducers) functions when defined, so channels with reducers _accumulate_ values rather than overwrite them.
-
-You can optionally specify `asNode` to control which node the update is treated as coming from, which affects which node executes next. See [Time travel: `asNode`](/oss/langgraph/use-time-travel#from-a-specific-node) for details.
-:::
+还可以通过 `as_node` / `asNode` 指定“这次 Update 被视为来自哪个 Node”，从而影响下一步执行位置。参阅[从指定 Node 开始时间旅行](/oss/langgraph/use-time-travel#from-a-specific-node)。
 
 ![Update](/oss/images/checkpoints_full_story.jpg)
 
-## Durability modes
+## Durability Mode
 
-LangGraph supports three durability modes that let you balance performance and data consistency. You can specify the durability mode when calling any graph execution method:
+LangGraph 支持三种 Durability Mode，用于权衡性能与数据一致性：
 
 :::python
 ```python
-graph.stream(
-    {"input": "test"},
-    durability="sync"
-)
+graph.stream({"input": "test"}, durability="sync")
 ```
 :::
 
@@ -596,348 +316,132 @@ await graph.stream(
 ```
 :::
 
-The durability modes, from least to most durable, are as follows:
+从性能高、持久性低到持久性高依次为：
 
-* `"exit"`: LangGraph persists changes only when graph execution exits — successfully, with an error, or due to a human-in-the-loop interrupt. This provides the best performance for long-running graphs but means intermediate state is not saved, so you cannot recover from system failures (like process crashes) mid-execution.
-* `"async"`: LangGraph persists changes asynchronously while the next step executes. This provides good performance and durability, but there is a small risk that LangGraph does not write checkpoints if the process crashes during execution.
-* `"sync"`: LangGraph persists changes synchronously before the next step starts. This ensures that LangGraph writes every checkpoint before continuing execution, providing high durability at the cost of some performance overhead.
+- **`"exit"`**：只在 Graph Execution 退出时持久化，包括成功、Error 或人在回路 Interrupt。性能最好，但进程中途崩溃时无法恢复中间 State。
+- **`"async"`**：下一 Step 执行时异步保存上一 Step。性能与持久性之间比较均衡，但进程恰好在写入前崩溃时存在极小的数据丢失窗口。
+- **`"sync"`**：下一 Step 开始前同步完成 Checkpoint 写入。持久性最高，但有额外 I/O 开销。
 
-## Optimize checkpoint storage
+## 优化 Checkpoint 存储
 
 :::python
-By default, LangGraph checkpoints write the full value of every state channel at each super-step. For long-running threads with large accumulations—such as multi-turn conversations—this can produce significant storage growth over time.
+默认情况下，每个 Super-step 都会保存各 State Channel 的完整 Value。对于长时间运行、持续累积大量消息的 Thread，这可能导致存储量持续增长。
 
-@[`DeltaChannel`] stores only incremental deltas instead of the full accumulated value, substantially reducing checkpoint size for append-heavy channels. See [DeltaChannel](/oss/langgraph/pregel#deltachannel) for usage and the storage-vs-latency tradeoff.
+@[`DeltaChannel`] 只保存增量 Delta，而不是每次都保存完整累计值，因此特别适合追加型 Channel。参阅 [DeltaChannel](/oss/langgraph/pregel#deltachannel)。
 
 <Warning>
-`DeltaChannel` requires `langgraph>=1.2` and is currently in beta. The API may change in future releases.
+`DeltaChannel` 需要 `langgraph>=1.2`，目前仍为 Beta，未来 API 可能变化。
 </Warning>
 :::
 
-## Checkpointer libraries
+## Checkpointer 库
 
-Under the hood, checkpointing is powered by checkpointer objects that conform to @[`BaseCheckpointSaver`] interface. LangGraph provides several checkpointer implementations, all implemented via standalone, installable libraries.
+底层所有 Checkpointer 都实现 @[BaseCheckpointSaver] 接口。官方将不同后端拆成独立安装包。
 
 :::python
 <Note>
-See [checkpointer integrations](/oss/integrations/checkpointers/index) for available providers.
+可用 Provider 参阅 [Checkpointer 集成](/oss/integrations/checkpointers/index)。
 </Note>
 
-* `langgraph-checkpoint`: The base interface for checkpointer savers (@[`BaseCheckpointSaver`]) and serialization/deserialization interface (@[`SerializerProtocol`]). Includes in-memory checkpointer implementation (@[`InMemorySaver`]) for experimentation. LangGraph comes with `langgraph-checkpoint` included.
-* `langgraph-checkpoint-sqlite`: An implementation of LangGraph checkpointer that uses SQLite database (@[`SqliteSaver`] / @[`AsyncSqliteSaver`]). Ideal for experimentation and local workflows. Needs to be installed separately.
-* `langgraph-checkpoint-postgres`: An advanced checkpointer that uses Postgres database (@[`PostgresSaver`] / @[`AsyncPostgresSaver`]), used in LangSmith. Ideal for using in production. Needs to be installed separately.
-* `langgraph-checkpoint-mongodb`: An advanced checkpointer that uses MongoDB (`MongoDBSaver` / `AsyncMongoDBSaver`). Ideal for using in production. Needs to be installed separately.
-* `langchain-azure-cosmosdb`: An implementation of LangGraph checkpointer that uses Azure Cosmos DB for NoSQL (@[`CosmosDBSaverSync`] / @[`CosmosDBSaver`]). Ideal for using in production with Azure. Supports both sync and async operations, with Microsoft Entra ID authentication. Needs to be installed separately.
+- `langgraph-checkpoint`：定义基础接口和序列化接口，并提供实验用 @[InMemorySaver]。
+- `langgraph-checkpoint-sqlite`：@[SqliteSaver] / @[AsyncSqliteSaver]，适合本地开发与实验。
+- `langgraph-checkpoint-postgres`：@[PostgresSaver] / @[AsyncPostgresSaver]，适合生产环境，LangSmith 也使用 PostgreSQL 后端。
+- `langgraph-checkpoint-mongodb`：MongoDB Checkpointer，适合生产环境。
+- `langchain-azure-cosmosdb`：基于 Azure Cosmos DB 的 Checkpointer，支持同步与异步操作以及 Microsoft Entra ID。
 :::
 
 :::js
-* `@langchain/langgraph-checkpoint`: The base interface for checkpointer savers (@[`BaseCheckpointSaver`]) and serialization/deserialization interface (@[`SerializerProtocol`]). Includes in-memory checkpointer implementation (@[`MemorySaver`]) for experimentation. LangGraph comes with `@langchain/langgraph-checkpoint` included.
-* `@langchain/langgraph-checkpoint-sqlite`: An implementation of LangGraph checkpointer that uses SQLite database (@[`SqliteSaver`]). Ideal for experimentation and local workflows. Needs to be installed separately.
-* `@langchain/langgraph-checkpoint-postgres`: An advanced checkpointer that uses Postgres database (@[`PostgresSaver`]), used in LangSmith. Ideal for using in production. Needs to be installed separately.
-* `@langchain/langgraph-checkpoint-mongodb`: An advanced checkpointer (`MongoDBSaver`) and long-term memory store (`MongoDBStore`) backed by MongoDB. The store supports cross-thread persistence with optional integrated vector search. Ideal for production use. Needs to be installed separately.
-* `@langchain/langgraph-checkpoint-redis`: An advanced checkpointer that uses Redis database (`RedisSaver`). Ideal for using in production. Needs to be installed separately.
+- `@langchain/langgraph-checkpoint`：基础接口和实验用 @[MemorySaver]。
+- `@langchain/langgraph-checkpoint-sqlite`：SQLite Checkpointer。
+- `@langchain/langgraph-checkpoint-postgres`：PostgreSQL Checkpointer。
+- `@langchain/langgraph-checkpoint-mongodb`：MongoDB Checkpointer，并提供长期 Memory Store。
+- `@langchain/langgraph-checkpoint-redis`：Redis Checkpointer。
 :::
 
-### Checkpointer interface
+### Checkpointer 接口
 
 :::python
-Each checkpointer conforms to @[`BaseCheckpointSaver`] interface and implements the following methods:
+`BaseCheckpointSaver` 的主要方法：
 
-* `.put` - Store a checkpoint with its configuration and metadata.
-* `.put_writes` - Store intermediate writes linked to a checkpoint (i.e. [pending writes](#pending-writes)).
-* `.get_tuple` - Fetch a checkpoint tuple using for a given configuration (`thread_id` and `checkpoint_id`). This is used to populate `StateSnapshot` in `graph.get_state()`.
-* `.list` - List checkpoints that match a given configuration and filter criteria. This is used to populate state history in `graph.get_state_history()`
+- `.put`：保存 Checkpoint 以及 Config / Metadata。
+- `.put_writes`：保存与 Checkpoint 关联的中间 Write，即 [Pending Writes](#pending-writes)。
+- `.get_tuple`：通过 `thread_id` / `checkpoint_id` 读取 Checkpoint Tuple。
+- `.list`：列出符合 Config 与过滤条件的 Checkpoint。
 
-If the checkpointer is used with asynchronous graph execution (i.e. executing the graph via `.ainvoke`, `.astream`, `.abatch`), asynchronous versions of the above methods will be used (`.aput`, `.aput_writes`, `.aget_tuple`, `.alist`).
-
-<Note>
-For running your graph asynchronously, you can use @[`InMemorySaver`], or async versions of Sqlite/Postgres checkpointers -- @[`AsyncSqliteSaver`] / @[`AsyncPostgresSaver`] checkpointers.
-</Note>
+异步图执行会使用对应异步方法 `.aput`、`.aput_writes`、`.aget_tuple`、`.alist`。
 :::
 
 :::js
-Each checkpointer conforms to the @[`BaseCheckpointSaver`] interface and implements the following methods:
-
-* `.put` - Store a checkpoint with its configuration and metadata.
-* `.putWrites` - Store intermediate writes linked to a checkpoint (i.e. [pending writes](#pending-writes)).
-* `.getTuple` - Fetch a checkpoint tuple using for a given configuration (`thread_id` and `checkpoint_id`). This is used to populate `StateSnapshot` in `graph.getState()`.
-* `.list` - List checkpoints that match a given configuration and filter criteria. This is used to populate state history in `graph.getStateHistory()`
+JavaScript 中对应接口包括 `.put`、`.putWrites`、`.getTuple` 与 `.list`。
 :::
 
 :::python
+## Serializer
 
-### Serializer
+Checkpointer 保存 Graph State 时需要序列化各 Channel Value。`langgraph_checkpoint` 定义 @[SerializerProtocol]，并提供默认 @[JsonPlusSerializer]，支持 LangChain / LangGraph Primitive、Datetime、Enum 等多种类型。
 
-When checkpointers save the graph state, they need to serialize the channel values in the state. This is done using serializer objects.
+### Pickle Fallback
 
-`langgraph_checkpoint` defines @[protocol][SerializerProtocol] for implementing serializers provides a default implementation (@[`JsonPlusSerializer`]) that handles a wide variety of types, including LangChain and LangGraph primitives, datetimes, enums and more.
-
-#### Serialization with `pickle`
-
-The default serializer, @[`JsonPlusSerializer`], uses ormsgpack and JSON under the hood, which is not suitable for all types of objects.
-
-If you want to fallback to pickle for objects not currently supported by the msgpack encoder (such as Pandas dataframes),
-you can use the `pickle_fallback` argument of the @[`JsonPlusSerializer`]:
+默认 @[JsonPlusSerializer] 使用 ormsgpack 和 JSON。如果需要保存 msgpack 暂不支持的对象，例如 Pandas DataFrame，可以启用 `pickle_fallback`：
 
 ```python
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
-# ... Define the graph ...
 graph.compile(
-    checkpointer=InMemorySaver(serde=JsonPlusSerializer(pickle_fallback=True))
+    checkpointer=InMemorySaver(
+        serde=JsonPlusSerializer(pickle_fallback=True)
+    )
 )
 ```
 
-#### Encryption
+### 加密
 
-Checkpointers can optionally encrypt all persisted state. To enable this, pass an instance of @[`EncryptedSerializer`] to the `serde` argument of any @[`BaseCheckpointSaver`] implementation. The easiest way to create an encrypted serializer is via @[`from_pycryptodome_aes`], which reads the AES key from the `LANGGRAPH_AES_KEY` environment variable (or accepts a `key` argument):
+可以向任何 @[BaseCheckpointSaver] 传入 @[EncryptedSerializer] 来加密持久化 State。最简单的方式是使用 AES，并通过 `LANGGRAPH_AES_KEY` 提供密钥：
 
 ```python
 import sqlite3
-
 from langgraph.checkpoint.serde.encrypted import EncryptedSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-serde = EncryptedSerializer.from_pycryptodome_aes()  # reads LANGGRAPH_AES_KEY
+serde = EncryptedSerializer.from_pycryptodome_aes()
 checkpointer = SqliteSaver(sqlite3.connect("checkpoint.db"), serde=serde)
 ```
 
-```python
-from langgraph.checkpoint.serde.encrypted import EncryptedSerializer
-from langgraph.checkpoint.postgres import PostgresSaver
-
-serde = EncryptedSerializer.from_pycryptodome_aes()
-checkpointer = PostgresSaver.from_conn_string("postgresql://...", serde=serde)
-checkpointer.setup()
-```
-
-When running on LangSmith, encryption is automatically enabled whenever `LANGGRAPH_AES_KEY` is present, so you only need to provide the environment variable. Other encryption schemes can be used by implementing @[`CipherProtocol`] and supplying it to @[`EncryptedSerializer`].
-
+在 LangSmith 中，只要设置 `LANGGRAPH_AES_KEY`，Checkpoint Encryption 会自动启用。
 :::
 
-## Build a custom checkpointer
+## 构建自定义 Checkpointer
 
 :::python
-
 <Tip>
-Validate your implementation as you build using the [conformance test suite](#testing-with-the-conformance-suite). It covers all five base methods and extended capabilities including delta channels. Run it in CI before shipping.
+建议使用 [`langgraph-checkpoint-conformance`](#使用一致性测试套件)持续验证自定义实现，并在 CI 中运行。
 </Tip>
 
-This section covers implementing `BaseCheckpointSaver` from scratch for a custom storage backend. If you already have a working checkpointer and only need to add delta channel support, jump to [Delta channel support](#delta-channel-support).
+自定义后端需要继承 `BaseCheckpointSaver`。持久化层主要包含两种存储抽象：
 
-### Overview
+- **Checkpoints**：每个 Super-step 一条记录，保存序列化 Graph State、Channel Version，以及 Parent Checkpoint。
+- **Writes**：每个 Node Output 一条或多条记录，保存与 Checkpoint 关联的 `(task_id, channel, value)`。
 
-LangGraph's persistence layer is built on two storage abstractions:
+### 基础契约
 
-- **Checkpoints table** — one row per superstep; stores the serialized graph state (`channel_values`, `channel_versions`, `versions_seen`) and links to its parent checkpoint.
-- **Writes table** — one row per node output within a superstep; stores `(task_id, channel, value)` tuples linked to a checkpoint.
+需要实现同步或异步版本的核心操作：
 
-Your checkpointer manages both tables. `put` writes a checkpoint row; `put_writes` writes node-output rows; `get_tuple` reads both back into a `CheckpointTuple`.
+- `put` / `aput`
+- `put_writes` / `aput_writes`
+- `get_tuple` / `aget_tuple`
+- `list` / `alist`
+- `delete_thread` / `adelete_thread`
 
-### Base contract
+实现时要特别保证**按具体 Checkpoint ID 直接查询**的路径正确。Graph 恢复、Subgraph、Delta Channel 等机制都依赖 `(thread_id, checkpoint_ns, checkpoint_id)` 精确定位历史记录。
 
-Subclass `BaseCheckpointSaver` and implement these five methods. All are required — a missing base method raises `NotImplementedError` at runtime.
-
-```python
-from collections.abc import AsyncIterator, Iterator, Sequence
-from typing import Any
-from langchain_core.runnables import RunnableConfig
-from langgraph.checkpoint.base import (
-    BaseCheckpointSaver,
-    ChannelVersions,
-    Checkpoint,
-    CheckpointMetadata,
-    CheckpointTuple,
-)
-
-class MyCheckpointer(BaseCheckpointSaver):
-    async def aput(
-        self,
-        config: RunnableConfig,
-        checkpoint: Checkpoint,
-        metadata: CheckpointMetadata,
-        new_versions: ChannelVersions,
-    ) -> RunnableConfig:
-        ...
-
-    async def aput_writes(
-        self,
-        config: RunnableConfig,
-        writes: Sequence[tuple[str, Any]],
-        task_id: str,
-        task_path: str = "",
-    ) -> None:
-        ...
-
-    async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
-        ...
-
-    async def alist(
-        self,
-        config: RunnableConfig | None,
-        *,
-        filter: dict[str, Any] | None = None,
-        before: RunnableConfig | None = None,
-        limit: int | None = None,
-    ) -> AsyncIterator[CheckpointTuple]:
-        ...
-        yield  # make this an async generator
-
-    async def adelete_thread(self, thread_id: str) -> None:
-        ...
-```
-
-#### put / aput
-
-Store one checkpoint row. Return an updated config with the stored `checkpoint_id`.
-
-Key requirements:
-
-- Serialize the checkpoint using `self.serde.dumps_typed(checkpoint)` — this handles all LangGraph-native types including `_DeltaSnapshot` blobs used by delta channels.
-- Store `metadata` in full — do not strip unknown keys. LangGraph adds new metadata fields (such as `counters_since_delta_snapshot` for delta channels) in minor releases; discarding them silently breaks features.
-- Store `config["configurable"].get("checkpoint_id")` as the parent checkpoint ID so `get_tuple` can populate `parent_config`.
-
-```python
-async def aput(self, config, checkpoint, metadata, new_versions):
-    thread_id = config["configurable"]["thread_id"]
-    checkpoint_ns = config["configurable"]["checkpoint_ns"]
-    checkpoint_id = checkpoint["id"]
-    parent_id = config["configurable"].get("checkpoint_id")
-
-    type_, blob = self.serde.dumps_typed(checkpoint)
-    serialized_metadata = self.serde.dumps_typed(metadata)
-
-    await self.db.execute(
-        "INSERT INTO checkpoints (...) VALUES (...)",
-        thread_id, checkpoint_ns, checkpoint_id, parent_id,
-        type_, blob, *serialized_metadata,
-    )
-    return {
-        "configurable": {
-            "thread_id": thread_id,
-            "checkpoint_ns": checkpoint_ns,
-            "checkpoint_id": checkpoint_id,
-        }
-    }
-```
-
-#### put_writes / aput_writes
-
-Store node-output rows for a single task within the current superstep. These rows are linked to the checkpoint by `(thread_id, checkpoint_ns, checkpoint_id)`.
-
-```python
-async def aput_writes(self, config, writes, task_id, task_path=""):
-    thread_id = config["configurable"]["thread_id"]
-    checkpoint_ns = config["configurable"]["checkpoint_ns"]
-    checkpoint_id = config["configurable"]["checkpoint_id"]
-
-    rows = []
-    for idx, (channel, value) in enumerate(writes):
-        type_, blob = self.serde.dumps_typed(value)
-        final_idx = WRITES_IDX_MAP.get(channel, idx)
-        rows.append((thread_id, checkpoint_ns, checkpoint_id,
-                      task_id, task_path, final_idx, channel, type_, blob))
-
-    await self.db.executemany("INSERT INTO writes (...) VALUES (...)", rows)
-```
-
-Import `WRITES_IDX_MAP` from `langgraph.checkpoint.base`. It maps special channels (`__error__`, `__interrupt__`, etc.) to reserved negative indices so they do not collide with regular write indices.
-
-#### get_tuple / aget_tuple
-
-Retrieve a checkpoint. The config may contain:
-
-- **No `checkpoint_id`** — return the latest checkpoint for the thread + namespace.
-- **A specific `checkpoint_id`** — return that exact checkpoint.
-
-**Both paths must work correctly.** The specific-id path is used for time travel and — critically — for delta channel state reconstruction on every graph invocation (see [Delta channel support](#delta-channel-support)). A broken specific-id lookup silently corrupts delta channel state.
-
-```python
-async def aget_tuple(self, config):
-    thread_id = config["configurable"]["thread_id"]
-    checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
-    checkpoint_id = config["configurable"].get("checkpoint_id")
-
-    if checkpoint_id:
-        row = await self.db.fetchone(
-            "SELECT * FROM checkpoints "
-            "WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=?",
-            thread_id, checkpoint_ns, checkpoint_id,
-        )
-    else:
-        row = await self.db.fetchone(
-            "SELECT * FROM checkpoints "
-            "WHERE thread_id=? AND checkpoint_ns=? "
-            "ORDER BY checkpoint_id DESC LIMIT 1",
-            thread_id, checkpoint_ns,
-        )
-
-    if row is None:
-        return None
-
-    writes = await self.db.fetchall(
-        "SELECT task_id, channel, type, value FROM writes "
-        "WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id=? "
-        "ORDER BY task_id, idx",
-        thread_id, checkpoint_ns, row["checkpoint_id"],
-    )
-    pending_writes = [
-        (w["task_id"], w["channel"], self.serde.loads_typed((w["type"], w["value"])))
-        for w in writes
-    ]
-
-    checkpoint = self.serde.loads_typed((row["type"], row["blob"]))
-    metadata = self.serde.loads_typed((row["metadata_type"], row["metadata"]))
-
-    parent_config = None
-    if row["parent_checkpoint_id"]:
-        parent_config = {
-            "configurable": {
-                "thread_id": thread_id,
-                "checkpoint_ns": checkpoint_ns,
-                "checkpoint_id": row["parent_checkpoint_id"],
-            }
-        }
-
-    return CheckpointTuple(
-        config={
-            "configurable": {
-                "thread_id": thread_id,
-                "checkpoint_ns": checkpoint_ns,
-                "checkpoint_id": row["checkpoint_id"],
-            }
-        },
-        checkpoint=checkpoint,
-        metadata=metadata,
-        parent_config=parent_config,
-        pending_writes=pending_writes,
-    )
-```
-
-<Warning>
-**Row key / index design matters for the specific-id lookup.** If your storage uses a time-ordered key (e.g., a reversed timestamp) that does not embed `checkpoint_id`, you cannot do a direct row read by id. You must either encode `checkpoint_id` in the row key, or build a secondary index. A scan with a value filter on every lookup works but does not scale.
-</Warning>
-
-#### list / alist
-
-Return checkpoints for a thread, newest first. Respect `before` (return only checkpoints older than that config's `checkpoint_id`) and `limit`.
-
-#### delete_thread / adelete_thread
-
-Delete all checkpoints and writes for a thread. Both checkpoint rows and write rows must be deleted.
-
-### Row key / index design
-
-How you store and index checkpoints directly affects correctness and performance.
-
-**Recommended schema (SQL):**
+### 推荐数据库 Schema
 
 ```sql
 CREATE TABLE checkpoints (
     thread_id          TEXT NOT NULL,
     checkpoint_ns      TEXT NOT NULL DEFAULT '',
-    checkpoint_id      TEXT NOT NULL,   -- ULID, lexicographically sortable newest-last
+    checkpoint_id      TEXT NOT NULL,
     parent_checkpoint_id TEXT,
     type               TEXT,
     checkpoint         BYTEA,
@@ -959,180 +463,57 @@ CREATE TABLE writes (
 );
 ```
 
-Because `checkpoint_id` is a ULID, it sorts lexicographically — larger values are newer. "Get latest" is `ORDER BY checkpoint_id DESC LIMIT 1`; "get by id" is an equality lookup on the primary key.
+`checkpoint_id` 是可按字典序排序的 ULID，因此可以高效实现“最新 Checkpoint”和“按 ID 精确查找”。非 SQL 后端也应该保证 `(thread_id, checkpoint_ns, checkpoint_id)` 能接近 O(1) 查询，而不是扫描整个 Thread。
 
-**For non-SQL stores:** the same principle applies. Whatever key scheme you use, direct lookup by `(thread_id, checkpoint_ns, checkpoint_id)` must be O(1) or close to it. Avoid designs where the only way to find a checkpoint by id is to scan all rows for a thread.
+### 序列化
 
-### Serialization
+应始终使用 `self.serde` 序列化 Checkpoint、Write 和 Metadata，而不是自行直接使用 `pickle`。默认 `JsonPlusSerializer` 已支持 LangGraph Native Type、Pydantic v2、Dataclass、NumPy、Datetime、Enum 等。
 
-Always use `self.serde` (inherited from `BaseCheckpointSaver`, defaults to `JsonPlusSerializer`) for checkpoints, writes, and metadata. Do not use `pickle` directly for metadata — it works, but `JsonPlusSerializer` produces human-readable output and handles versioning better.
+### 扩展能力
 
-`JsonPlusSerializer` handles all LangGraph-native types automatically:
-- `_DeltaSnapshot` — the sentinel blob used by delta channels (msgpack ext code 7)
-- Pydantic v2 models, dataclasses, numpy arrays, datetimes, enums, and more
+以下方法并非最基础契约的一部分，但可以启用更多 Agent Server 能力：
 
-If you write a custom serializer, make sure it can round-trip `_DeltaSnapshot` from `langgraph.checkpoint.serde.types`.
+| 方法 | 能力 |
+| --- | --- |
+| `adelete_for_runs` | Multi-task Rollback Strategy |
+| `acopy_thread` | 高效 Thread Fork |
+| `aprune` | Thread History Pruning |
+| `aget_delta_channel_history` | 高效重建 Delta Channel State |
 
-### Extended capabilities
+Agent Server 会在启动时检测自定义 Checkpointer 支持哪些扩展能力。
 
-These methods are optional but unlock additional Agent Server features. Implement them if your storage backend can support them efficiently.
-
-| Method | What it enables |
-|---|---|
-| `adelete_for_runs` | Rollback multitask strategy |
-| `acopy_thread` | Efficient thread forking |
-| `aprune` | Thread history pruning |
-| `aget_delta_channel_history` | Efficient delta channel state reconstruction (see below) |
-
-Agent Server auto-detects which capabilities your checkpointer implements at startup and activates the corresponding features.
-
-### Delta channel support
+### Delta Channel 支持
 
 <Info>
-**DeltaChannel is in beta.** The API and on-disk representation may change while the design stabilizes.
+`DeltaChannel` 仍处于 Beta，其 API 与磁盘表示未来可能变化。
 </Info>
 
-`DeltaChannel` is a reducer channel that stores only a sentinel (`MISSING`) in checkpoint blobs instead of the full channel value. State is reconstructed by replaying ancestor writes through the reducer. This makes checkpoint blobs O(1) per step instead of O(N) for channels like `messages` that accumulate over time.
+`DeltaChannel` 不在每个 Checkpoint Blob 中保存完整累计值，而是保留增量 Write，并在加载时回放祖先 Checkpoint 的 Write 来重建 Value。这样，对于 `messages` 这类不断增长的 Channel，单 Step Checkpoint 大小可以从 O(N) 降到接近 O(1)。
 
-#### What the runtime needs
+运行时需要获得：
 
-When loading a checkpoint whose delta channels are absent from `channel_values`, LangGraph calls `saver.get_delta_channel_history(config=config, channels=[...])`. This returns, for each channel:
+- `writes`：从最近 Snapshot 到当前 Checkpoint 的所有相关写入，按时间从旧到新排列。
+- `seed`：可选的最近 `_DeltaSnapshot`。
 
-- **`writes`** — all writes to that channel in the ancestor chain, oldest first, up to the nearest snapshot.
-- **`seed`** (optional) — the stored `_DeltaSnapshot` blob at the nearest ancestor that has one; absent if the walk reaches the root without finding a snapshot.
+如果实现自定义 `get_delta_channel_history`，必须保证祖先链和 Write 顺序正确。尤其需要注意：默认实现会不断通过具体 `checkpoint_id` 调用 `get_tuple`；如果按 ID 查询路径错误，Delta State 可能静默重建为空。
 
-The runtime then calls `channel.from_checkpoint(seed)` and `channel.replay_writes(writes)` to reconstruct the live value.
+#### Pruning
 
-#### Default implementation
+Delta Channel 的一个 Checkpoint 并不是自包含的，它依赖祖先 Write Chain。做 Prune / Delete 时不能删除仍被存活 Checkpoint 依赖的 Write。安全做法包括：
 
-`BaseCheckpointSaver` provides a default `get_delta_channel_history` that works with any correct `get_tuple` implementation:
+1. Prune 前遍历依赖链并保护必要 Write。
+2. Prune 前强制写入完整 `_DeltaSnapshot`。
+3. 暂时不对含 Delta Channel 的 Thread 做 History Pruning。
 
-```python
-# Simplified from BaseCheckpointSaver
-def get_delta_channel_history(self, *, config, channels):
-    target = self.get_tuple(config)          # load the head checkpoint
-    cursor = target.parent_config            # walk from its parent
-    collected = {ch: [] for ch in channels}
-    seed = {}
-    remaining = set(channels)
+#### Copy Thread
 
-    while cursor and remaining:
-        tup = self.get_tuple(cursor)         # ← requires correct by-id lookup
-        if tup is None:
-            break
-        for write in reversed(tup.pending_writes or []):
-            if write[1] in remaining:
-                collected[write[1]].append(write)
-        for ch in list(remaining):
-            if ch in tup.checkpoint["channel_values"]:
-                seed[ch] = tup.checkpoint["channel_values"][ch]
-                remaining.discard(ch)
-        cursor = tup.parent_config
+实现 `copy_thread` 时，需要复制足够完整的祖先链，使每个 Delta Channel 都能追溯到至少一个 `_DeltaSnapshot`；仅复制 Head Checkpoint 会导致 State 无法正确重建。
 
-    return {
-        ch: {"writes": list(reversed(collected[ch])), **({"seed": seed[ch]} if ch in seed else {})}
-        for ch in channels
-    }
-```
+### 使用一致性测试套件
 
-**The critical dependency:** `get_tuple(cursor)` is always called with a specific `checkpoint_id` (the parent's id). If that lookup returns `None`, the walk stops immediately and every delta channel reconstructs as empty — silently, with no error. This is why the specific-id path in `get_tuple` must be correct.
+`langgraph-checkpoint-conformance` 可以验证实现是否符合 Base Contract，包括 Delta Channel History：
 
-#### Performance override
-
-The default walk issues one `get_tuple` call per ancestor checkpoint. For backends with good query support, override `get_delta_channel_history` (and its async twin) to retrieve the ancestor chain and writes in two queries:
-
-```python
-async def aget_delta_channel_history(self, *, config, channels):
-    if not channels:
-        return {}
-
-    thread_id = config["configurable"]["thread_id"]
-    checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
-    checkpoint_id = config["configurable"]["checkpoint_id"]
-
-    # Stage 1: stream ancestors newest-first until every channel has a seed
-    ancestors = await self.db.fetchall(
-        "SELECT checkpoint_id, parent_checkpoint_id, type, checkpoint "
-        "FROM checkpoints "
-        "WHERE thread_id=? AND checkpoint_ns=? AND checkpoint_id < ? "
-        "ORDER BY checkpoint_id DESC",
-        thread_id, checkpoint_ns, checkpoint_id,
-    )
-
-    chain_by_ch: dict[str, list[str]] = {ch: [] for ch in channels}
-    seed_by_ch: dict[str, Any] = {}
-    remaining = set(channels)
-    cur_id = config["configurable"]["checkpoint_id"]
-
-    for row in ancestors:
-        if not remaining:
-            break
-        parent_id = row["parent_checkpoint_id"]
-        ckpt = self.serde.loads_typed((row["type"], row["checkpoint"]))
-        cv = ckpt.get("channel_values") or {}
-        for ch in list(remaining):
-            chain_by_ch[ch].append(row["checkpoint_id"])
-            if ch in cv:
-                seed_by_ch[ch] = cv[ch]
-                remaining.discard(ch)
-        cur_id = parent_id
-
-    # Stage 2: fetch writes for each channel's ancestor chain in one query
-    result: dict[str, DeltaChannelHistory] = {}
-    for ch in channels:
-        chain = chain_by_ch[ch]
-        if not chain:
-            entry: DeltaChannelHistory = {"writes": []}
-            if ch in seed_by_ch:
-                entry["seed"] = seed_by_ch[ch]
-            result[ch] = entry
-            continue
-
-        write_rows = await self.db.fetchall(
-            f"SELECT checkpoint_id, task_id, idx, type, value FROM writes "
-            f"WHERE thread_id=? AND checkpoint_ns=? AND channel=? "
-            f"AND checkpoint_id IN ({','.join('?' * len(chain))})"
-            f"ORDER BY checkpoint_id, task_id, idx",
-            thread_id, checkpoint_ns, ch, *chain,
-        )
-        writes_by_cid: dict[str, list[PendingWrite]] = {}
-        for row in write_rows:
-            cid = row["checkpoint_id"]
-            value = self.serde.loads_typed((row["type"], row["value"]))
-            writes_by_cid.setdefault(cid, []).append((row["task_id"], ch, value))
-
-        # chain is newest-first; iterate oldest-first to get correct replay order
-        collected: list[PendingWrite] = []
-        for cid in reversed(chain):
-            collected.extend(writes_by_cid.get(cid, []))
-
-        entry = {"writes": collected}
-        if ch in seed_by_ch:
-            entry["seed"] = seed_by_ch[ch]
-        result[ch] = entry
-
-    return result
-```
-
-#### Pruning with delta channels
-
-`DeltaChannel` state is not self-contained in a single checkpoint — it depends on the ancestor write chain back to the nearest `_DeltaSnapshot`. If you implement `prune` or `delete_for_runs`, you must not delete write rows that a surviving checkpoint's delta channels depend on.
-
-Safe options:
-
-1. **Walk before pruning** — for each checkpoint you intend to keep, walk its ancestor chain and mark all write rows up to the nearest `_DeltaSnapshot` as non-deletable.
-2. **Force a snapshot before pruning** — rewrite `channel_values[ch] = _DeltaSnapshot(reconstructed_value)` on the checkpoint you are keeping, then delete ancestors freely.
-3. **Skip pruning for delta-channel threads** — the safest short-term option if you do not yet need pruning.
-
-#### Copy thread with delta channels
-
-When implementing `copy_thread`, copy the complete ancestor chain — not just the head checkpoint. The target thread must have write rows going back to at least one `_DeltaSnapshot` for every delta channel, or those channels will reconstruct as empty after the copy.
-
-### Testing with the conformance suite
-
-`langgraph-checkpoint-conformance` validates your implementation against the full contract, including delta channel history:
-
-```python
+```bash
 pip install langgraph-checkpoint-conformance
 ```
 
@@ -1148,13 +529,11 @@ async def my_checkpointer():
 async def main():
     report = await validate(my_checkpointer)
     report.print_report()
-    # Fails the process if any base capability is missing or broken
     if not report.passed_all_base():
         raise RuntimeError("Checkpointer failed conformance suite")
 
 asyncio.run(main())
 ```
 
-The suite auto-detects which extended capabilities your checkpointer implements (including `aget_delta_channel_history`) and runs the relevant tests for each. Run it as part of your CI before shipping.
-
+建议把这套测试作为 CI Gate，在发布自定义 Checkpointer 前持续运行。
 :::
