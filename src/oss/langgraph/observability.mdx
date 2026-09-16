@@ -1,36 +1,36 @@
 ---
-title: LangSmith Observability
+title: LangSmith 可观测性
 ---
 
-Traces are a series of steps that your application takes to go from input to output. Each of these individual steps is represented by a run. You can use [LangSmith](https://smith.langchain.com) to visualize these execution steps. To use it, [enable tracing for your application](/langsmith/trace-with-langgraph). This enables you to do the following:
+Trace 是应用从输入走到输出过程中经历的一系列执行步骤，其中每一个独立步骤都由一个 Run 表示。你可以使用 [LangSmith](https://smith.langchain.com) 将这些执行步骤可视化。要使用这项能力，请先[为应用启用 Tracing](/langsmith/trace-with-langgraph)。启用后，你可以：
 
-* [Debug a locally running application](/langsmith/observability-studio#debug-langsmith-traces).
-* [Evaluate the application performance](/oss/langchain/test/evals).
-* [Monitor the application](/langsmith/dashboards).
+* [调试本地运行的应用](/langsmith/observability-studio#debug-langsmith-traces)。
+* [评估应用性能](/oss/langchain/test/evals)。
+* [监控应用](/langsmith/dashboards)。
 
-## Prerequisites
+## 前置条件
 
-Before you begin, ensure you have the following:
+开始之前，请确保你已经拥有：
 
-- **A LangSmith account**: Sign up (for free) or log in at [smith.langchain.com](https://smith.langchain.com).
-- **A LangSmith API key**: Follow the [Create an API key](/langsmith/create-account-api-key) guide.
+- **LangSmith 账号**：在 [smith.langchain.com](https://smith.langchain.com) 免费注册或登录。
+- **LangSmith API Key**：按照[创建 API Key](/langsmith/create-account-api-key)指南完成创建。
 
-## Enable tracing
+## 启用 Tracing
 
-To enable tracing for your application, set the following environment variables:
+要为应用启用 Tracing，请设置以下环境变量：
 
 ```python
 export LANGSMITH_TRACING=true
 export LANGSMITH_API_KEY=<your-api-key>
 ```
 
-By default, the trace will be logged to the project with the name `default`. To configure a custom project name, see [Log to a project](#log-to-a-project).
+默认情况下，Trace 会记录到名为 `default` 的 Project 中。如需配置自定义 Project 名称，请参阅[记录到指定 Project](#log-to-a-project)。
 
-For more information, see [Trace with LangGraph](/langsmith/trace-with-langgraph).
+更多信息请参阅[使用 LangGraph 进行 Trace](/langsmith/trace-with-langgraph)。
 
-## Trace selectively
+## 选择性 Trace
 
-You may opt to trace specific invocations or parts of your application using LangSmith's `tracing_context` context manager:
+你可以使用 LangSmith 的 `tracing_context` 上下文管理器，只对特定调用或应用中的特定部分进行 Trace：
 
 :::python
 ```python
@@ -67,20 +67,20 @@ await agent.invoke(
 ```
 :::
 
-## Log to a project
+## 记录到指定 Project
 
-<Accordion title="Statically">
+<Accordion title="静态配置">
 
-You can set a custom project name for your entire application by setting the `LANGSMITH_PROJECT` environment variable:
+你可以通过设置 `LANGSMITH_PROJECT` 环境变量，为整个应用指定自定义 Project 名称：
 
 ```bash
 export LANGSMITH_PROJECT=my-agent-project
 ```
 </Accordion>
 
-<Accordion title="Dynamically">
+<Accordion title="动态配置">
 
-You can set the project name programmatically for specific operations:
+你可以通过代码为特定操作动态设置 Project 名称：
 
 :::python
 ```python
@@ -108,9 +108,9 @@ await agent.invoke(
 :::
 </Accordion>
 
-## Add metadata to traces
+## 为 Trace 添加元数据
 
-You can annotate your traces with custom metadata and tags:
+你可以使用自定义 Metadata 和 Tag 对 Trace 进行标注：
 
 :::python
 ```python
@@ -127,7 +127,7 @@ response = agent.invoke(
 )
 ```
 
-`tracing_context` also accepts tags and metadata for fine-grained control:
+`tracing_context` 同样支持 Tag 和 Metadata，从而实现更细粒度的控制：
 
 ```python
 with ls.tracing_context(
@@ -163,18 +163,15 @@ await agent.invoke(
 ```
 :::
 
-This custom metadata and tags will be attached to the trace in LangSmith.
-
+这些自定义 Metadata 和 Tag 会附加到 LangSmith 中对应的 Trace 上。
 
 <Tip>
-To learn more about how to use traces to debug, evaluate, and monitor your agents, see the [LangSmith documentation](/langsmith/observability).
+如需进一步了解如何使用 Trace 调试、评估和监控智能体，请参阅 [LangSmith 文档](/langsmith/observability)。
 </Tip>
 
+## 使用匿名化器，避免在 Trace 中记录敏感数据
 
-## Use anonymizers to prevent logging of sensitive data in traces
-
-You may want to mask sensitive data to prevent it from being logged to LangSmith. You can create [anonymizers](/langsmith/mask-inputs-outputs#rule-based-masking-of-inputs-and-outputs) and apply them to
-your graph using configuration. This example will redact anything matching the Social Security Number format XXX-XX-XXXX from traces sent to LangSmith.
+你可能希望对敏感数据进行遮蔽，避免其被记录到 LangSmith。你可以创建[匿名化器（Anonymizer）](/langsmith/mask-inputs-outputs#rule-based-masking-of-inputs-and-outputs)，并通过配置将它应用到你的图中。下面的示例会将发送到 LangSmith 的 Trace 中，所有符合美国社会安全号码格式 `XXX-XX-XXXX` 的内容进行脱敏。
 
 :::python
 ```python Python
