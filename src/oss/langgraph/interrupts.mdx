@@ -14,33 +14,35 @@ import LanggraphInterruptsValidateConditionalEdgePatternJs from '/snippets/code-
 import LanggraphInterruptsValidateConditionalEdgeJs from '/snippets/code-samples/langgraph-interrupts-validate-conditional-edge-js.mdx';
 import LanggraphInterruptsValidateConditionalEdgePy from '/snippets/code-samples/langgraph-interrupts-validate-conditional-edge-py.mdx';
 
-Interrupt 允许你在图执行到任意位置时暂停，并在继续之前等待外部输入。这是 LangGraph 实现**人在回路（Human-in-the-loop）**工作流的核心机制。当触发 Interrupt 时，LangGraph 会通过[持久化层](/oss/langgraph/persistence)保存 Graph State，并可以无限期等待，直到你显式恢复执行。
+Interrupt 允许你在 Graph 执行到特定位置时暂停，并在继续之前等待外部输入。这使 LangGraph 能够实现**人在回路（Human-in-the-loop, HITL）**模式：当流程需要审批、修正、补充信息或人工判断时，不必让整个 Run 失败或结束，而是把执行现场持久化下来，等输入到达后继续。
 
-在任意 Graph Node 中调用 `interrupt()` 即可暂停执行。这个函数接收任意可 JSON 序列化的 Value，并把它暴露给调用方。准备继续时，再次调用 Graph，并传入带 `resume` Value 的 `Command`；这个 Resume Value 会成为 Node 内 `interrupt()` 调用的返回值。
+当 `interrupt()` 被触发时，LangGraph 会使用[持久化层](/oss/langgraph/persistence)保存当前 Graph State，并且可以无限期等待，直到你显式恢复执行。
 
-与在固定 Node 前后暂停的静态断点不同，Interrupt 是**动态的**：它可以出现在代码任意位置，也可以根据业务逻辑有条件触发。
+Interrupt 的基本方式是在任意 Graph Node 内调用 `interrupt()`。它接收任意可 JSON 序列化的值，并把该 Payload 暴露给调用方。准备继续时，再次调用 Graph，并传入带 `resume` Value 的 `Command`；这个 Resume Value 会成为 Node 内 `interrupt()` 调用的返回值。
+
+与“在固定 Node 前后暂停”的静态 Breakpoint 不同，Interrupt 是**动态的**：可以放在代码任意位置，也可以根据业务逻辑有条件触发。
 
 :::python
-- **Checkpoint 会保存现场**：Checkpointer 会写入精确 Graph State，因此即使图处于 Error / Pause 状态，也可以稍后恢复。
-- **`thread_id` 是持久游标**：通过 `config={"configurable": {"thread_id": ...}}` 告诉 Checkpointer 要加载哪条 Thread 的 State。
-- **Event Streaming 中的 Interrupt Payload**：使用 `graph.stream_events(..., version="v3")` 时，传给 `interrupt()` 的值会出现在 `stream.interrupts` 中；如果 Run 因等待输入而暂停，`stream.interrupted` 为 `True`。
+- **Checkpoint 会保存现场**：Checkpointer 写入精确 Graph State，因此即使 Run 暂停或进入错误状态，也可以以后继续。
+- **`thread_id` 是持久游标**：通过 `config={"configurable": {"thread_id": ...}}` 告诉 Checkpointer 要加载哪条 Thread。
+- **Event Streaming 中的 Interrupt Payload**：使用 `graph.stream_events(..., version="v3")` 时，传给 `interrupt()` 的值会出现在 `stream.interrupts`；当 Run 因等待输入而暂停时，`stream.interrupted` 为 `True`。
 :::
 
 :::js
-- **Checkpoint 会保存现场**：Checkpointer 保存精确 Graph State，因此以后可以恢复。
-- **`thread_id` 是持久游标**：调用 `invoke` 时传入 `{ configurable: { thread_id: ... } }`。
-- **Interrupt Payload 会出现在 `__interrupt__`**：传给 `interrupt()` 的值会通过结果的 `__interrupt__` 字段返回。
+- **Checkpoint 会保存现场**：Checkpointer 写入精确 Graph State，因此可以稍后恢复。
+- **`thread_id` 是持久游标**：调用 `invoke` 时通过 `{ configurable: { thread_id: ... } }` 指定要恢复的 Thread。
+- **Interrupt Payload**：传给 `interrupt()` 的值会通过 `__interrupt__` 字段返回给调用方。
 :::
 
-复用同一个 `thread_id` 会继续同一条执行历史；使用新的值则会创建全新的 Thread 和空 State。
+`thread_id` 实际上就是持久化 Cursor：复用同一个 ID 会加载同一条 Thread 的 Checkpoint；换一个新的 ID 就会创建一条全新的 Thread，从空 State 开始。
 
-## 使用 `interrupt` 暂停执行
+## 使用 `interrupt` 暂停
 
-@[`interrupt`] 会暂停图，并向外部调用方返回一个 Value。要使用它，需要：
+@[`interrupt`] 会暂停 Graph Execution，并向调用方暴露一个 Value。要使用 Interrupt，需要：
 
-1. 配置 **Checkpointer** 以持久化 Graph State；生产环境应使用持久化后端。
-2. 在 Config 中提供 **Thread ID**，Runtime 才知道应该恢复哪份 State。
-3. 在需要暂停的位置调用 `interrupt()`，Payload 必须能够进行 JSON 序列化。
+1. 一个 **Checkpointer** 保存 Graph State（生产环境应使用持久化 Checkpointer）。
+2. Config 中的 **Thread ID**，让 Runtime 知道之后该恢复哪一份 State。
+3. 在需要暂停的位置调用 `interrupt()`；Payload 必须可 JSON 序列化。
 
 :::python
 ```python
@@ -69,26 +71,42 @@ async function approvalNode(state: State) {
 ```
 :::
 
-调用 `interrupt()` 后：
+调用 `interrupt()` 后会发生：
 
-1. Graph Execution 在当前 Interrupt 位置暂停。
-2. Checkpointer 保存 State；生产环境中应使用数据库等持久化 Checkpointer。
-3. Interrupt Payload 返回给调用方。
-4. 图会持续等待，直到收到 Resume 输入。
-5. Resume Value 被传回 Node，成为 `interrupt()` 的返回值。
+1. **Graph 在调用点暂停**。
+2. **State 通过 Checkpointer 保存**，因此之后可以恢复；生产环境应使用数据库等 Durable Checkpointer。
+:::python
+3. **Interrupt Value 暴露给调用方**：使用 Event Streaming 时位于 `stream.interrupts`；默认 `invoke()` API 下位于 `result["__interrupt__"]`。Payload 可以是任意 JSON-serializable String / Object / Array 等。
+:::
+:::js
+3. **Interrupt Value 暴露给调用方**：位于 `__interrupt__` 字段。
+:::
+4. **Graph 可以无限期等待**，直到外部提交 Resume Value。
+5. **恢复后 Resume Value 被传回 Node**，成为该 `interrupt()` 的 Return Value。
 
 ## 恢复 Interrupt
 
-Graph 暂停后，通过再次调用图，并把 Resume Value 放入 `Command(resume=...)` 来继续执行。
+Graph 因 Interrupt 暂停后，需要再次调用它，并传入包含 Resume Value 的 `Command`。Resume Value 会被传回原来的 `interrupt()` 调用，使 Node 能继续执行。
 
 :::python
-推荐使用 [Event Streaming](/oss/langgraph/event-streaming) 驱动可能发生 Interrupt 的图：
+推荐使用[事件流](/oss/langgraph/event-streaming)驱动可能发生 Interrupt 的 Graph。它通过 `stream.interrupts` / `stream.interrupted` 暴露中断信息，并通过 `stream.output` 提供最终 State。
 
 <LanggraphInterruptsResumeV2Py />
 
 <Note>
-普通 `graph.invoke(...)` 同样支持 Interrupt，并通过 `result["__interrupt__"]` 暴露结果。如果不需要类型化 Stream Projection，可以继续使用它；否则优先使用 `graph.stream_events(..., version="v3")`。
+默认的 `graph.invoke(...)` 仍然完全可用，并通过 `result["__interrupt__"]` 暴露 Interrupt。如果不需要 Streaming Projection，可以继续使用 `invoke`；否则优先使用 `graph.stream_events(..., version="v3")`。
 </Note>
+
+恢复时需要注意：
+
+- 必须使用 Interrupt 发生时**同一个 Thread ID**。
+- `Command(resume=...)` 中的值会成为 @[`interrupt`] Return Value。
+- **恢复时 Node 会从函数开头重新执行**，不是从 `interrupt()` 那一行继续，因此 `interrupt()` 之前的代码会再次执行。
+- Resume Value 可以是任意 JSON-serializable Value。
+
+<Warning>
+`Command(resume=...)` 是设计用来作为 `invoke()` / `stream()` / `stream_events()` Input 的 `Command` 模式。`update`、`goto`、`graph` 主要用于[从 Node Function 返回 Command](/oss/langgraph/graph-api#command)。不要通过 `Command(update=...)` 开启下一轮普通对话；新一轮应传普通 Input Dict。
+</Warning>
 :::
 
 :::js
@@ -104,50 +122,51 @@ console.log(result.__interrupt__);
 // Resume with the human's response
 await graph.invoke(new Command({ resume: true }), config);
 ```
-:::
 
-恢复时要记住：
-
-- 必须使用触发 Interrupt 时的**同一个 Thread ID**。
-- `Command(resume=...)` 中的 Value 会成为 @[`interrupt`] 调用的返回值。
-- Resume 时，**Node 会从函数开头重新执行**，而不是从 Interrupt 所在的源代码行继续；因此 Interrupt 之前的代码会再次运行。
-- Resume Value 可以是任意可 JSON 序列化 Value。
+关键点与 Python 相同：同一 Thread ID、Resume Value 成为 `interrupt()` Return Value、Node 从开头重放。
 
 <Warning>
-`Command(resume=...)` 是把 `Command` 作为 `invoke()` / `stream()` / `stream_events()` **输入**时的主要模式。`update`、`goto`、`graph` 等其他参数主要用于[从 Node 返回 Command](/oss/langgraph/graph-api#command)。普通多轮对话应传入正常输入对象，不要使用只有 `Command(update=...)` 的输入来“开始下一轮”。
+`new Command({ resume: ... })` 是适合作为 `invoke()` / `stream()` Input 的主要 `Command` 模式。不要用单独的 `update` Command 继续普通多轮对话；应传普通 Input Object。
 </Warning>
+:::
 
 ## 常见模式
 
-Interrupt 最重要的能力是“暂停并等待外部输入”，典型场景包括：
+Interrupt 最核心的能力就是：**暂停执行，等待外部输入。** 常见用途包括：
 
-- <Icon icon="circle-check" /> [审批工作流](#approve-or-reject)：在执行 API 调用、数据库修改、支付等高影响操作前暂停。
-- <Icon icon="link" /> [处理多个 Interrupt](#handling-multiple-interrupts)：同一次 Invocation 中并行分支可能产生多个 Interrupt。
-- <Icon icon="pencil" /> [审核和修改 State](#review-and-edit-state)：人工检查并修改 LLM 输出或 Tool Call。
-- <Icon icon="tool" /> [在 Tool 内部 Interrupt](#interrupts-in-tools)：Tool 真正执行前进行审核与编辑。
-- <Icon icon="shield-check" /> [校验人工输入](#validating-human-input)：输入非法时重新询问。
+- <Icon icon="circle-check" /> [审批工作流](#approve-or-reject)：执行关键动作（API Call、数据库修改、金融交易）前暂停。
+- <Icon icon="link" /> [处理多个 Interrupt](#handling-multiple-interrupts)：同一次 Invocation 中存在多个 Interrupt 时，用 Interrupt ID 匹配 Resume Value。
+- <Icon icon="pencil" /> [审核与编辑](#review-and-edit-state)：继续之前，让人类检查并修改 LLM Output 或 State。
+- <Icon icon="tool" /> [Tool 中的 Interrupt](#interrupts-in-tools)：Tool 真正执行前暂停并审核 / 编辑 Tool Call。
+- <Icon icon="shield-check" /> [校验人工输入](#validating-human-input)：继续下一步前验证人工输入，不合法则重新询问。
 
-### 使用 Event Streaming 处理 HITL
+### HITL + Streaming
 
-人在回路智能体通常需要同时消费模型输出、State Snapshot 和 Interrupt。可以循环调用 `stream_events`，直到 Run 完成：
+构建 Interactive Agent 时，可以使用[事件流](/oss/langgraph/event-streaming)同时消费 Message Chunk、State Snapshot 与 Interrupt。
 
-- `stream.messages`：逐 Token 消费模型输出。
-- `stream.values`：查看每个 Step 的完整 State Snapshot。
-- `stream.interrupted` / `stream.interrupts`：判断是否暂停并读取 Payload。
-- `Command(resume=...)`：再次调用 `stream_events` 继续执行。
+使用 `graph.stream_events(..., version="v3")` 返回的 Typed Projection，在一个 Loop 中重复运行直到 Graph 真正结束：
+
+- 通过 `stream.messages` Token-by-token 流式显示 AI 输出。
+- 通过 `stream.values` 观察每个 Step 的完整 State Snapshot。
+- 通过 `stream.interrupted` 判断 Run 是否暂停，并从 `stream.interrupts` 读取 Payload。
+- 使用 `Command(resume=...)` 再次调用 `stream_events`；重复直到 `stream.interrupted` 为 False。
 
 :::python
 <LanggraphInterruptsHitlStreamPy />
+
+- `stream.messages`：Chat Model 输出；可遍历 `message.text` 获取 Token Delta。嵌套 Subgraph 的 Message 可从 `stream.subgraphs[*].messages` 读取。
+- `stream.values`：每个 Step 后的完整 State Snapshot。
+- `stream.interrupted` / `stream.interrupts`：判断是否暂停与获取 Interrupt Payload。
+- `Command(resume=...)`：作为下一次 `stream_events` Input 恢复执行。
 :::
 
 :::js
 <LanggraphInterruptsHitlStreamJs />
 :::
 
-<a id="handling-multiple-interrupts"></a>
 ### 处理多个 Interrupt
 
-如果多个并行分支同时调用 `interrupt()`，一次 Invocation 可能产生多个待恢复 Interrupt。此时应把每个 **Interrupt ID** 映射到对应 Resume Value，以确保 Runtime 正确配对。
+如果多个并行 Branch 同时调用 `interrupt()`，一次 Invocation 可能产生多个 Pending Interrupt。此时恢复时可以把每个 **Interrupt ID** 映射到对应 Resume Value，保证 Runtime 把每个回答交回正确的 `interrupt()`。
 
 :::python
 <LanggraphInterruptsMultiplePy />
@@ -169,18 +188,17 @@ import {
 
 const State = Annotation.Root({
   vals: Annotation<string[]>({
-    reducer: (left, right) =>
-      left.concat(Array.isArray(right) ? right : [right]),
+    reducer: (left, right) => left.concat(Array.isArray(right) ? right : [right]),
     default: () => [],
   }),
 });
 
-function nodeA(_state: typeof State.State) {
+function nodeA() {
   const answer = interrupt("question_a") as string;
   return { vals: [`a:${answer}`] };
 }
 
-function nodeB(_state: typeof State.State) {
+function nodeB() {
   const answer = interrupt("question_b") as string;
   return { vals: [`b:${answer}`] };
 }
@@ -195,8 +213,8 @@ const graph = new StateGraph(State)
   .compile({ checkpointer: new MemorySaver() });
 
 const config = { configurable: { thread_id: "1" } };
-
 const interruptedResult = await graph.invoke({ vals: [] }, config);
+
 const resumeMap: Record<string, string> = {};
 if (isInterrupted(interruptedResult)) {
   for (const i of interruptedResult[INTERRUPT]) {
@@ -207,10 +225,9 @@ const result = await graph.invoke(new Command({ resume: resumeMap }), config);
 ```
 :::
 
-<a id="approve-or-reject"></a>
-### 批准或拒绝
+### Approve or Reject
 
-最常见的模式是在高影响动作前暂停并请求批准：
+最常见的 Interrupt 用法之一，是关键动作执行前要求人工审批。例如 API Call、数据库修改、付款等。
 
 :::python
 ```python
@@ -225,67 +242,81 @@ def approval_node(state: State) -> Command[Literal["proceed", "cancel"]]:
 
     if is_approved:
         return Command(goto="proceed")
-    return Command(goto="cancel")
+    else:
+        return Command(goto="cancel")
 ```
+
+恢复时传 `True` 表示批准，`False` 表示拒绝：
+
+```python
+graph.stream_events(Command(resume=True), config=config, version="v3").output
+graph.stream_events(Command(resume=False), config=config, version="v3").output
+```
+
+<Accordion title="完整示例">
+<LanggraphInterruptsApprovalPy />
+</Accordion>
 :::
 
 :::js
 ```typescript
-import { interrupt, Command } from "@langchain/langgraph";
-
 const approvalNode: typeof State.Node = (state) => {
   const isApproved = interrupt({
     question: "Do you want to proceed?",
     details: state.actionDetails
   });
 
-  if (isApproved) return new Command({ goto: "proceed" });
-  return new Command({ goto: "cancel" });
-}
+  return new Command({ goto: isApproved ? "proceed" : "cancel" });
+};
 ```
 :::
 
-:::python
-批准时传 `True`，拒绝时传 `False`：
-
-```python
-graph.stream_events(Command(resume=True), config=config, version="v3").output
-graph.stream_events(Command(resume=False), config=config, version="v3").output
-```
-:::
-
-:::js
-```typescript
-await graph.invoke(new Command({ resume: true }), config);
-await graph.invoke(new Command({ resume: false }), config);
-```
-:::
-
-<a id="review-and-edit-state"></a>
 ### 审核和编辑 State
 
-Interrupt Payload 可以携带待审核内容。人工修改后，把修改后的内容作为 Resume Value 返回，再写入 State。
+有时不只是让人类“批准/拒绝”，而是希望人类检查并直接编辑一段内容，例如修正 LLM Output、补充缺失信息或修改 Tool Parameter。
 
 :::python
+```python
+from langgraph.types import interrupt
+
+def review_node(state: State):
+    edited_content = interrupt({
+        "instruction": "Review and edit this content",
+        "content": state["generated_text"]
+    })
+    return {"generated_text": edited_content}
+```
+
+恢复时直接传编辑后的内容：
+
+```python
+graph.stream_events(
+    Command(resume="The edited and improved text"),
+    config=config,
+    version="v3",
+).output
+```
+
+<Accordion title="完整示例">
 <LanggraphInterruptsReviewPy />
+</Accordion>
 :::
 
 :::js
 ```typescript
-function humanReview(state: typeof State.State) {
-  const edited = interrupt({
-    instruction: "Review and edit this text",
-    content: state.generatedText,
+const reviewNode: typeof State.Node = (state) => {
+  const editedContent = interrupt({
+    instruction: "Review and edit this content",
+    content: state.generatedText
   });
-  return { generatedText: edited };
-}
+  return { generatedText: editedContent };
+};
 ```
 :::
 
-<a id="interrupts-in-tools"></a>
-### 在 Tool 中使用 Interrupt
+### Tool 中的 Interrupt
 
-Interrupt 也可以直接放在 Tool 函数内部。这样，无论 Tool 在图的哪个位置被调用，都会在真正执行前自动暂停，便于人工批准、编辑参数或取消操作。
+`interrupt()` 也可以直接放进 Tool Function 中。这样 Tool 每次被调用时都会自动暂停，允许人工在执行真实 Side Effect 前审核、编辑甚至取消 Tool Call。
 
 :::python
 ```python
@@ -315,10 +346,6 @@ def send_email(to: str, subject: str, body: str):
 
 :::js
 ```typescript
-import { tool } from "@langchain/core/tools";
-import { interrupt } from "@langchain/langgraph";
-import * as z from "zod";
-
 const sendEmailTool = tool(
   async ({ to, subject, body }) => {
     const response = interrupt({
@@ -332,7 +359,6 @@ const sendEmailTool = tool(
     if (response?.action === "approve") {
       const finalTo = response.to ?? to;
       const finalSubject = response.subject ?? subject;
-      const finalBody = response.body ?? body;
       return `Email sent to ${finalTo} with subject '${finalSubject}'`;
     }
     return "Email cancelled by user";
@@ -340,59 +366,58 @@ const sendEmailTool = tool(
   {
     name: "send_email",
     description: "Send an email to a recipient",
-    schema: z.object({
-      to: z.string(),
-      subject: z.string(),
-      body: z.string(),
-    }),
+    schema: z.object({ to: z.string(), subject: z.string(), body: z.string() }),
   },
 );
 ```
 :::
 
-这种模式把审批逻辑和 Tool 本身绑定在一起，因此 Tool 可在多个 Agent / Graph 中复用，而无需在每个调用点额外实现 HITL。
+这种模式把 Approval Logic 与 Tool 自身绑定，因此 Tool 可以在不同 Graph / Agent 中复用；LLM 仍然自然地决定调用 Tool，而 Interrupt 会在真正执行动作之前暂停。
 
-<a id="validating-human-input"></a>
 ### 校验人工输入
 
-当输入非法，需要重新询问用户时，推荐模式是：**每次 Node Invocation 只调用一次 `interrupt()`**，把错误提示写入 State，然后使用 **Conditional Edge** 重新路由回该 Node。
+如果人工输入不合法，希望重新询问，推荐方式是：**每次 Node Invocation 只调用一次 `interrupt()`**，把错误提示保存在 State 中，然后通过 Conditional Edge 路由回该 Node。
 
 <Warning>
-不要在同一个 Node 中使用 `while True` + 多次 `interrupt()` 进行校验。因为每次 Resume 都会从 Node 开头重新执行，循环内此前迭代也会被重放，可能导致执行次数快速膨胀。
+**不要在单个 Node 内写 `while True` + `interrupt()` 校验循环。**
+
+因为每次 Resume 都会从 Node 开头重放，一个 Node 中多次调用 `interrupt()` 会导致之前的 Loop Iteration 也被重放：第一次 Resume 重放 1 次，第二次重放 2 次……任何 Loop Body 中的逻辑都可能出现快速膨胀的重复执行。
 </Warning>
 
 正确模式：
 
-1. 在 State 中保存下一次要显示的问题，例如 `pending_question`。
-2. Node 中只调用一次 `interrupt()`。
-3. 如果输入非法，更新 `pending_question` 并返回。
-4. 使用 Conditional Edge 再次进入同一 Node；输入合法后进入 `END` 或下一个 Node。
+1. 把重新询问的问题保存在 State，例如 `pending_question`。
+2. Node 每次只调用一次 `interrupt()`。
+3. 输入无效时，更新 `pending_question` 并返回。
+4. 使用 Conditional Edge 决定返回同一 Node 还是进入 END。
 
 :::python
 <LanggraphInterruptsValidateConditionalEdgePatternPy />
+
+<Accordion title="完整示例">
+<LanggraphInterruptsValidateConditionalEdgePy />
+</Accordion>
 :::
 
 :::js
 <LanggraphInterruptsValidateConditionalEdgePatternJs />
 :::
 
-完整实现：
+## Interrupt 的规则
 
-:::python
-<LanggraphInterruptsValidateConditionalEdgePy />
-:::
+`interrupt()` 底层通过抛出一种特殊 Exception 通知 Runtime：“当前执行需要暂停”。Runtime 捕获它、保存 State，然后等待外部输入。
 
-:::js
-<LanggraphInterruptsValidateConditionalEdgeJs />
-:::
+恢复时，**整个 Node 会从开头重新执行**，不会直接从 `interrupt()` 那一行继续。因此下面这些规则非常重要。
 
-## Interrupt 使用规则
+### 不要用 `try/except` / `try/catch` 包住 `interrupt`
 
-当 Node 内调用 @[`interrupt`] 时，LangGraph 会抛出一个由 Runtime 捕获的特殊异常，以此暂停执行并保存当前 State。收到 Resume 输入后，**整个 Node 会从函数开头重新运行**，并不是从 `interrupt()` 那一行继续。这带来几条必须遵循的规则。
+如果 Bare `try/except` 捕获了所有 Exception，就会把 Interrupt 用来暂停 Graph 的特殊 Exception 一起吞掉。
 
-### 不要用宽泛 `try/except` 包裹 `interrupt`
+推荐：
 
-`interrupt()` 本身通过特殊异常暂停 Runtime。如果用宽泛 `except Exception` 捕获它，这个 Interrupt 可能无法传播到 Graph Runtime。
+- ✅ 把 `interrupt()` 与容易失败的逻辑分开。
+- ✅ 只捕获明确、具体的业务 Exception。
+- 🔴 不要用 Bare `except Exception` 包住 `interrupt()`。
 
 :::python
 <CodeGroup>
@@ -401,29 +426,34 @@ def node_a(state: State):
     interrupt("What's your name?")
     try:
         fetch_data()
-    except Exception as e:
+    except NetworkException as e:
         print(e)
     return state
 ```
-```python Specific exception
+
+```python Bad
 def node_a(state: State):
     try:
-        name = interrupt("What's your name?")
-        fetch_data()
-    except NetworkException as e:
+        interrupt("What's your name?")
+    except Exception as e:
         print(e)
     return state
 ```
 </CodeGroup>
 :::
 
-如果确实需要捕获 Error，尽量捕获具体异常类型，不要把 `interrupt()` 放进宽泛的 Exception Handler。
+:::js
+如果必须在 `try/catch` 中调用 Interrupt，应确保只处理明确业务 Error，并对其他 Error 重新 `throw`，这样 Interrupt Exception 才能传播回 Runtime。
+:::
 
-### 在同一 Node 中保持 Interrupt 调用顺序稳定
+### 不要在 Node 内改变 `interrupt()` 的顺序
 
-当 Node 包含多个 Interrupt 时，LangGraph 会为当前 Task 保存一组 Resume Value。每次 Resume 都从 Node 开头开始，并按**索引位置**把 Resume Value 与遇到的 Interrupt 依次配对。因此调用顺序必须保持稳定。
+一个 Node 可以包含多个 Interrupt，但 Runtime 会把 Resume Value 按**严格索引顺序**与 Interrupt 配对。
 
-:::python
+恢复时 Node 从开头执行，每遇到一个 `interrupt()`，LangGraph 就按当前位置检查 Task 的 Resume List 中是否已有对应值。因此顺序必须跨多次执行保持一致。
+
+✅ 正确：
+
 ```python
 def node_a(state: State):
     name = interrupt("What's your name?")
@@ -431,52 +461,59 @@ def node_a(state: State):
     city = interrupt("What's your city?")
     return {"name": name, "age": age, "city": city}
 ```
-:::
 
-:::js
-```typescript
-async function nodeA(state: State) {
-    const name = interrupt("What's your name?");
-    const age = interrupt("What's your age?");
-    const city = interrupt("What's your city?");
-    return { name, age, city };
-}
-```
-:::
+🔴 避免：
 
-不要：
+- 根据非确定条件跳过某个 Interrupt。
+- 使用执行次数可能变化的 Loop 动态产生 Interrupt。
+- 在同一 Node 内使用 `while True` Interrupt Validation Loop；应改用 Conditional Edge。
 
-- 根据可能变化的条件跳过某个 Interrupt。
-- 用非确定性的循环动态产生不同数量的 Interrupt。
-- 使用 `while True` + `interrupt()` 做输入校验；使用[条件边模式](#validating-human-input)。
+### Interrupt Payload 不要返回复杂对象
 
-### Interrupt Payload 必须容易序列化
+不同 Checkpointer 的序列化能力不同。为了保证 Graph 可以迁移到不同 Deployment，最佳实践是只向 `interrupt()` 传可合理序列化的值。
 
-推荐只传字符串、数字、布尔值、数组、普通 Object / Dict 等 JSON 兼容类型。
+✅ 推荐：
 
+- String / Number / Boolean
+- List / Dict / Plain Object
+- JSON-serializable Structured Data
+
+🔴 不推荐：
+
+- Function
+- Class Instance
+- Socket / DB Connection
+- 无法序列化的 Runtime Object
+
+:::python
 ```python
-response = interrupt({
-    "question": "Enter user details",
-    "fields": ["name", "email", "age"],
-    "current_values": state.get("user", {})
-})
+def node_a(state: State):
+    response = interrupt({
+        "question": "Enter user details",
+        "fields": ["name", "email", "age"],
+        "current_values": state.get("user", {})
+    })
+    return {"user": response}
 ```
+:::
 
-不要在 Payload 中传函数、数据库连接、复杂类实例等对象，否则不同 Checkpointer / Serializer 可能无法保存。
+### `interrupt()` 之前的 Side Effect 必须幂等
 
-### `interrupt` 之前的副作用必须幂等
+因为恢复时 Node 会重新执行，所以位于 `interrupt()` **之前**的 Side Effect 可能执行多次。
 
-因为 Resume 会从 Node 开头重跑，`interrupt()` 之前发生的副作用也会再次执行。比如先创建数据库记录、再 Interrupt，那么每次 Resume 都可能重复创建记录。
+例如一个 Node 先创建数据库记录，再调用 Interrupt。恢复一次就会再次创建一条记录，导致重复数据。
 
 推荐：
 
-- Interrupt 之前使用幂等操作，例如 Upsert。
-- 尽可能把非幂等副作用放到 Interrupt 之后。
-- 更复杂的副作用拆成独立 Node / Task，并配置可靠重试与 Idempotency Key。
+- ✅ 在 Interrupt 前使用幂等操作，例如 Upsert。
+- ✅ 把真正的 Side Effect 放在 Interrupt **之后**。
+- ✅ 最好把 Side Effect 拆成 Interrupt 后的独立 Node。
+- 🔴 不要在 Interrupt 前无条件创建新记录。
+- 🔴 不要在 Interrupt 前执行非幂等 Append / Send / Charge 等操作。
 
 :::python
 <CodeGroup>
-```python Idempotent operation
+```python Idempotent
 def node_a(state: State):
     db.upsert_user(
         user_id=state["user_id"],
@@ -485,6 +522,7 @@ def node_a(state: State):
     approved = interrupt("Approve this change?")
     return {"approved": approved}
 ```
+
 ```python Side effect after interrupt
 def node_a(state: State):
     approved = interrupt("Approve this change?")
@@ -495,49 +533,52 @@ def node_a(state: State):
         )
     return {"approved": approved}
 ```
+
+```python Separate node
+def approval_node(state: State):
+    approved = interrupt("Approve this change?")
+    return {"approved": approved}
+
+def notification_node(state: State):
+    if state["approved"]:
+        send_notification(user_id=state["user_id"], status="approved")
+    return state
+```
 </CodeGroup>
 :::
 
-## 与以函数方式调用的 Subgraph 配合
+## 与“作为函数调用的 Subgraph”一起使用
 
-如果 Parent Node 在函数内部调用 Subgraph，而 Subgraph 内触发 Interrupt，那么 Resume 时：
+如果某个 Parent Node 内调用 Subgraph，而 Interrupt 发生在 Subgraph 中，恢复时会同时发生两层重放：
 
-1. Parent Graph 会从**调用 Subgraph 的 Parent Node 开头**重新执行。
-2. Subgraph 也会从触发 Interrupt 的 **Subgraph Node 开头**重新执行。
+- Parent Graph 会从**调用 Subgraph 的 Parent Node 开头**重新执行。
+- Subgraph 也会从**包含 Interrupt 的 Subgraph Node 开头**重新执行。
 
 :::python
 ```python
 def node_in_parent_graph(state: State):
-    some_code()  # <-- re-executes when resumed
+    some_code()  # <-- resumed 时会重新执行
     subgraph_result = subgraph.invoke(some_input)
 
 def node_in_subgraph(state: State):
-    some_other_code()  # <-- also re-executes when resumed
+    some_other_code()  # <-- 也会重新执行
     result = interrupt("What's your name?")
 ```
 :::
 
-:::js
-```typescript
-async function nodeInParentGraph(state: State) {
-    someCode();
-    const subgraphResult = await subgraph.invoke(someInput);
-}
+因此多层 Subgraph 中尤其要关注幂等性与 Side Effect Placement。
 
-async function nodeInSubgraph(state: State) {
-    someOtherCode();
-    const result = interrupt("What's your name?");
-}
-```
-:::
+## 使用 Interrupt 调试
 
-## 使用静态 Interrupt 调试
+除了动态 HITL Interrupt，LangGraph 还提供**静态 Interrupt**，类似 Debugger Breakpoint，可以在指定 Node **之前或之后**暂停，用于逐步检查 Graph。
 
-静态 Interrupt 可以作为 Breakpoint，在指定 Node **之前或之后**暂停执行，适合单步调试 Graph。
+<Note>
+静态 Interrupt **不推荐**用于实际 HITL Workflow。HITL 应使用 @[`interrupt`] Function。
+</Note>
 
+<Tabs>
+<Tab title="编译时">
 :::python
-编译时设置：
-
 ```python
 graph = builder.compile(
     interrupt_before=["node_a"],
@@ -546,20 +587,24 @@ graph = builder.compile(
 )
 
 config = {"configurable": {"thread_id": "some_thread"}}
+
 graph.invoke(inputs, config=config)
 graph.invoke(None, config=config)
 ```
 
-也可以在单次 `invoke` 时通过 `interrupt_before` / `interrupt_after` 动态设置。
+1. Breakpoint 在 `compile` 时配置。
+2. `interrupt_before` 表示 Node 执行前暂停。
+3. `interrupt_after` 表示 Node 执行后暂停。
+4. 静态 Breakpoint 需要 Checkpointer。
+5. 第一次 Invocation 执行到首个 Breakpoint 后暂停。
+6. 传 `None` 恢复，并继续到下一个 Breakpoint。
 :::
 
 :::js
-编译时可通过 `interruptBefore` / `interruptAfter` 设置：
-
 ```typescript
 const graph = builder.compile({
-  interruptBefore: ["nodeA"],
-  interruptAfter: ["nodeB", "nodeC"],
+  interruptBefore: ["node_a"],
+  interruptAfter: ["node_b", "node_c"],
   checkpointer,
 });
 
@@ -568,17 +613,44 @@ await graph.invoke(inputs, config);
 await graph.invoke(null, config);
 ```
 :::
+</Tab>
 
-<Note>
-静态 Interrupt 更适合 Debugging，不推荐作为正式 HITL 工作流。正式人在回路逻辑应优先使用 @[`interrupt`] 函数。
-</Note>
+<Tab title="运行时">
+可以在每一次 Invocation 上动态指定 Breakpoint，因此不同 Run 可以使用不同的 Debug 位置。
+
+:::python
+```python
+graph.invoke(
+    inputs,
+    interrupt_before=["node_a"],
+    interrupt_after=["node_b", "node_c"],
+    config=config,
+)
+
+graph.invoke(None, config=config)
+```
+:::
+
+:::js
+```typescript
+await graph.invoke(inputs, {
+  interruptBefore: ["node_a"],
+  interruptAfter: ["node_b", "node_c"],
+  configurable: { thread_id: "some_thread" },
+});
+
+await graph.invoke(null, config);
+```
+:::
+</Tab>
+</Tabs>
 
 <Tip>
-使用 [LangSmith](/langsmith/observability) 可以观察 Interrupt 前后的 Trace、State 和 Tool Call。
+可以使用 [LangSmith](/langsmith/observability) Debug Interrupt 与完整执行 Trace。
 </Tip>
 
 ### 使用 LangSmith Studio
 
-[LangSmith Studio](/langsmith/studio) 支持在 UI 中设置静态 Breakpoint，并在执行任意阶段检查 Graph State。
+在 [LangSmith Studio](/langsmith/studio) 中，可以直接通过 UI 为 Graph 设置静态 Interrupt，也可以在执行任意位置查看当前 Graph State。
 
 ![image](/oss/images/static-interrupt.png)
