@@ -2,26 +2,25 @@
 title: MISSING_CHECKPOINTER
 ---
 
-You are attempting to use built-in LangGraph persistence without providing a checkpointer.
+你正在尝试使用 LangGraph 内置的持久化能力，但没有提供 Checkpointer。
 
 :::python
-This happens when a `checkpointer` is missing in the `compile()` method of @[`StateGraph`][StateGraph] or @[`@entrypoint`].
+当 @[`StateGraph`][StateGraph] 的 `compile()` 方法或 @[`@entrypoint`] 中缺少 `checkpointer` 时，就会出现这个错误。
 :::
 
 :::js
-This happens when a `checkpointer` is missing in the `compile()` method of @[`StateGraph`][StateGraph] or @[`entrypoint`].
+当 @[`StateGraph`][StateGraph] 的 `compile()` 方法或 @[`entrypoint`] 中缺少 `checkpointer` 时，就会出现这个错误。
 :::
 
+## 故障排查
 
-## Troubleshooting
-
-The following may help resolve this error:
+以下做法通常可以解决这个错误：
 
 :::python
--   Initialize and pass a checkpointer to the `compile()` method of @[`StateGraph`][StateGraph] or @[`@entrypoint`].
+- 初始化一个 Checkpointer，并将其传给 @[`StateGraph`][StateGraph] 的 `compile()` 方法或 @[`@entrypoint`]。
 :::
 :::js
--   Initialize and pass a checkpointer to the `compile()` method of @[`StateGraph`][StateGraph] or @[`entrypoint`].
+- 初始化一个 Checkpointer，并将其传给 @[`StateGraph`][StateGraph] 的 `compile()` 方法或 @[`entrypoint`]。
 :::
 
 :::python
@@ -65,8 +64,8 @@ const workflow = entrypoint(
 
 :::
 
--   Use the LangGraph API so you don't need to implement or configure checkpointers manually. The API handles all persistence infrastructure for you.
+- 也可以使用 LangGraph API / Agent Server，这样你无需手动实现或配置 Checkpointer；持久化基础设施会由服务端负责。
 
-## Related
+## 相关内容
 
-- Read more about [persistence](/oss/langgraph/persistence).
+- 进一步了解[持久化](/oss/langgraph/persistence)。
