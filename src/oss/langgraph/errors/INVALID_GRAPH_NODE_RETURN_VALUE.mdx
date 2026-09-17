@@ -3,8 +3,7 @@ title: INVALID_GRAPH_NODE_RETURN_VALUE
 ---
 
 :::python
-A LangGraph @[`StateGraph`]
-received a non-dict return type from a node. Here's an example:
+LangGraph @[`StateGraph`] 收到了某个节点返回的非 `dict` 类型结果。例如：
 
 ```python
 from typing import TypedDict
@@ -25,7 +24,7 @@ builder.add_node(bad_node)
 graph = builder.compile()
 ```
 
-Invoking the above graph will result in an error like this:
+调用上面的图时，会得到类似下面的错误：
 
 ```python
 graph.invoke({ "some_key": "someval" });
@@ -36,12 +35,11 @@ InvalidUpdateError: Expected dict, got ['whoops']
 For troubleshooting, visit: https://docs.langchain.com/oss/python/langgraph/errors/INVALID_GRAPH_NODE_RETURN_VALUE
 ```
 
-Nodes in your graph must return a dict containing one or more keys defined in your state.
+图中的节点必须返回一个 `dict`，其中包含你在 State 中定义的一个或多个 Key。
 :::
 
 :::js
-A LangGraph @[`StateGraph`]
-received a non-object return type from a node. Here's an example:
+LangGraph @[`StateGraph`] 收到了某个节点返回的非对象类型结果。例如：
 
 ```typescript
 import { z } from "zod/v4";
@@ -62,7 +60,7 @@ const builder = new StateGraph(State).addNode("badNode", badNode);
 const graph = builder.compile();
 ```
 
-Invoking the above graph will result in an error like this:
+调用上面的图时，会得到类似下面的错误：
 
 ```typescript
 await graph.invoke({ someKey: "someval" });
@@ -73,17 +71,17 @@ InvalidUpdateError: Expected object, got ['whoops']
 For troubleshooting, visit: https://langchain-ai.github.io/langgraphjs/troubleshooting/errors/INVALID_GRAPH_NODE_RETURN_VALUE
 ```
 
-Nodes in your graph must return an object containing one or more keys defined in your state.
+图中的节点必须返回一个对象，其中包含你在 State 中定义的一个或多个 Key。
 :::
 
-## Troubleshooting
+## 故障排查
 
-The following may help resolve this error:
+以下做法通常可以解决这个错误：
 
 :::python
-* If you have complex logic in your node, make sure all code paths return an appropriate dict for your defined state.
+* 如果节点内部包含较复杂的控制逻辑，请检查所有代码路径，确保它们最终都会为已定义的 State 返回合适的 `dict`。
 :::
 
 :::js
-* If you have complex logic in your node, make sure all code paths return an appropriate object for your defined state.
+* 如果节点内部包含较复杂的控制逻辑，请检查所有代码路径，确保它们最终都会为已定义的 State 返回合适的对象。
 :::
