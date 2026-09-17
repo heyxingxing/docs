@@ -1,43 +1,29 @@
 ---
-title: Custom stream channels
-description: Stream custom server-side data to the frontend and read it with useExtension and useChannel
+title: 自定义 Stream Channel
+description: 将服务端自定义数据流式传输到前端，并通过 useExtension 和 useChannel 读取
 ---
 
-LangGraph agents stream more than messages and tool calls. A server-side
-**stream transformer** can inspect or rewrite the protocol as it flows to the
-client and publish its own structured data on a named **custom channel**. The
-frontend reads that channel with two selectors: @[`useExtension`] for the latest
-payload, and @[`useChannel`] as a raw-events escape hatch.
+LangGraph 智能体能够流式传输的不只是 Message 和 Tool Call。服务端的 **Stream Transformer** 可以在协议事件流向客户端的过程中检查或改写这些事件，并把自己的结构化数据发布到一个具名的 **Custom Channel** 上。前端可以通过两个 Selector 读取这个 Channel：使用 @[`useExtension`] 获取最新 Payload，或者使用 @[`useChannel`] 作为读取原始事件的 Escape Hatch。
 
-The example below is a customer-support agent whose transformer redacts PII
-(emails, phone numbers, SSNs, card numbers, IPs) from every event before it
-reaches the browser, and publishes running redaction counts on a
-`redaction-stats` channel. The side panel renders those counts live.
+下面的示例是一个 Customer Support Agent。它的 Transformer 会在每个事件到达浏览器之前，对其中的 PII（邮箱、电话号码、SSN、银行卡号、IP）进行脱敏，同时把累计脱敏统计发布到 `redaction-stats` Channel。侧边面板会实时渲染这些统计数据。
 
 import { PatternEmbed } from "/snippets/pattern-embed.jsx"
 import UseStreamTypeInference from '/snippets/oss/use-stream-type-inference.mdx';
 
 <PatternEmbed pattern="custom-stream-channel" />
 
-## How custom channels work
+## Custom Channel 如何工作
 
-A custom channel has two ends. On the server, a @[`StreamTransformer`] opens a
-named @[`StreamChannel`] and pushes payloads onto it. On the client, a selector
-subscribes to the matching `custom:<name>` channel and exposes the payloads as
-reactive state.
+一个 Custom Channel 有服务端和客户端两个端点。在服务端，@[`StreamTransformer`] 打开一个具名 @[`StreamChannel`]，然后向其中 Push Payload。在客户端，Selector 订阅匹配的 `custom:<name>` Channel，并把 Payload 以响应式 State 暴露出来。
 
-The transformer's `process` method runs for every protocol event. It can mutate
-the event in place (here, scrubbing PII from `messages`, `tools`, and `values`
-data) and push side-channel updates whenever it has something to report.
+Transformer 的 `process` 方法会对每一个 Protocol Event 执行。它既可以原地修改事件（这里会对 `messages`、`tools` 和 `values` 数据中的 PII 做清洗），也可以在需要报告信息时向 Side Channel Push 更新。
 
-The client-side selectors (`useExtension`, `useChannel`) ship with the v1
-frontend SDK packages (`@langchain/react`, `@langchain/vue`,
-`@langchain/svelte`, `@langchain/angular`).
+客户端 Selector（`useExtension`、`useChannel`）随 v1 前端 SDK Package 一起提供，包括 `@langchain/react`、`@langchain/vue`、`@langchain/svelte` 和 `@langchain/angular`。
 
 :::python
 
 <Note>
-Stream transformers and `StreamChannel` require `langgraph>=1.2`.
+Stream Transformer 和 `StreamChannel` 需要 `langgraph>=1.2`。
 </Note>
 
 :::
@@ -45,7 +31,7 @@ Stream transformers and `StreamChannel` require `langgraph>=1.2`.
 :::js
 
 <Note>
-Stream transformers and `StreamChannel` require `@langchain/langgraph>=1.3.1`.
+Stream Transformer 和 `StreamChannel` 需要 `@langchain/langgraph>=1.3.1`。
 </Note>
 
 :::
@@ -89,7 +75,7 @@ def create_redaction_stats_transformer() -> RedactionStatsTransformer:
     return RedactionStatsTransformer()
 ```
 
-Attach the transformer when you build the agent:
+在构建 Agent 时挂载 Transformer：
 
 ```python
 from langchain.agents import create_agent
@@ -138,7 +124,7 @@ export const createRedactionStatsTransformer = (): StreamTransformer<{
 };
 ```
 
-Attach the transformer when you build the agent:
+在构建 Agent 时挂载 Transformer：
 
 ```ts
 import { createAgent } from "langchain";
@@ -152,8 +138,7 @@ const agent = createAgent({
 
 :::
 
-The payload type is whatever the transformer pushes. The client examples below
-read this shape:
+Payload 的类型完全由 Transformer Push 的内容决定。下面的客户端示例会读取如下数据结构：
 
 ```ts
 type PiiType = "email" | "phone" | "ssn" | "credit_card" | "ip_address";
@@ -167,10 +152,9 @@ type RedactionStatsEvent = {
 };
 ```
 
-## Setting up `useStream`
+## 配置 `useStream`
 
-Wire up @[`useStream`] as usual. The custom-channel selectors take the same
-`stream` handle returned here.
+像平常一样配置 @[`useStream`]。Custom Channel Selector 会接收这里返回的同一个 `stream` Handle。
 
 <UseStreamTypeInference />
 
@@ -241,14 +225,11 @@ export class RedactionChatComponent {
 ```
 </CodeGroup>
 
-## Read the latest payload with `useExtension`
+## 使用 `useExtension` 读取最新 Payload
 
-`useExtension` subscribes to a `custom:<name>` channel and returns the most
-recent payload the transformer pushed, already unwrapped and typed. It is the
-ergonomic choice when the UI only needs the current value, such as a live
-counter, progress percentage, or status badge.
+`useExtension` 会订阅一个 `custom:<name>` Channel，并返回 Transformer 最近一次 Push 的 Payload；返回值已经完成了解包并带有类型信息。当 UI 只需要当前值时，它通常是最方便的选择，例如实时计数器、完成百分比或状态 Badge。
 
-Pass the bare channel name (`"redaction-stats"`), not the `custom:` prefix:
+传入的是裸 Channel Name（`"redaction-stats"`），不要带 `custom:` 前缀：
 
 <CodeGroup>
 ```tsx React
@@ -280,24 +261,15 @@ const latest = injectExtension<RedactionStatsEvent>(stream, "redaction-stats");
 ```
 </CodeGroup>
 
-The return value follows each framework's reactivity model: a plain value in
-React and Svelte, a `Ref` in Vue (`latest.value`), and a signal in Angular
-(`latest()`). The value is `undefined` until the first payload arrives.
+返回值会遵循各框架自己的响应式模型：React 和 Svelte 中是普通值，Vue 中是 `Ref`（`latest.value`），Angular 中是 Signal（`latest()`）。在第一个 Payload 到达之前，其值为 `undefined`。
 
-An optional third `target` argument scopes the subscription to a namespace, the
-same way `useMessages(stream, node)` scopes messages to a discovered graph node.
-See [Graph execution](/oss/langgraph/frontend/graph-execution) for namespace
-targeting.
+可选的第三个 `target` 参数可以把订阅限定到某个 Namespace，方式与 `useMessages(stream, node)` 把 Message 限定到某个已发现 Graph Node 相同。Namespace Targeting 参见 [Graph Execution](/oss/langgraph/frontend/graph-execution)。
 
-## Buffer raw events with `useChannel`
+## 使用 `useChannel` 缓冲原始事件
 
-`useChannel` is the raw-events escape hatch. It subscribes to one or more
-channels and returns a bounded buffer of the underlying protocol events rather
-than a single unwrapped value. Reach for it when you need history instead of the
-latest value, such as an event log or audit trail, or when you need a channel
-that no higher-level selector covers.
+`useChannel` 是读取 Raw Event 的 Escape Hatch。它可以订阅一个或多个 Channel，并返回底层 Protocol Event 的有界 Buffer，而不是单个已经解包的值。当你需要“历史”而不是“最新值”时，例如 Event Log、Audit Trail，或者需要消费没有对应高级 Selector 的 Channel，就应该使用它。
 
-Pass the full channel id (`"custom:redaction-stats"`):
+这里需要传完整 Channel ID（`"custom:redaction-stats"`）：
 
 <CodeGroup>
 ```tsx React
@@ -327,8 +299,7 @@ const rawEvents = injectChannel(stream, ["custom:redaction-stats"]);
 ```
 </CodeGroup>
 
-Each entry is a raw protocol event, so the payload sits under
-`event.params.data`. Unwrap it yourself:
+每一项都是 Raw Protocol Event，因此 Payload 位于 `event.params.data` 下。需要你自己完成解包：
 
 ```ts
 function parseRedactionStatsEvents(rawEvents: Event[]): RedactionStatsEvent[] {
@@ -342,7 +313,7 @@ function parseRedactionStatsEvents(rawEvents: Event[]): RedactionStatsEvent[] {
 }
 ```
 
-Control the buffer with the options argument:
+可以通过 Options 参数控制 Buffer：
 
 ```ts
 const rawEvents = useChannel(
@@ -353,52 +324,40 @@ const rawEvents = useChannel(
 );
 ```
 
-| Option | Default | Effect |
+| 选项 | 默认值 | 作用 |
 | --- | --- | --- |
-| `bufferSize` | `"default"` | Maximum number of buffered events. Older events drop once the cap is reached. |
-| `replay` | `true` | Replay events already seen on the channel when the selector mounts, instead of only live events. |
+| `bufferSize` | `"default"` | 最多保留多少个 Buffer Event。超过上限后，较旧事件会被丢弃。 |
+| `replay` | `true` | Selector 挂载时，是否重放此前已经在该 Channel 上观测到的事件，而不是只接收后续 Live Event。 |
 
 <Note>
-Prefer the higher-level selectors (`useExtension`, `useMessages`,
-`useToolCalls`, `useValues`) for common cases. They return typed, unwrapped
-values and track only what you render. Use `useChannel` when you specifically
-need the raw event stream.
+常见场景优先使用高级 Selector（`useExtension`、`useMessages`、`useToolCalls`、`useValues`）。它们会返回已经解包、带类型的数据，而且只跟踪你真正渲染的部分。只有明确需要 Raw Event Stream 时才使用 `useChannel`。
 </Note>
 
-## Choosing between `useExtension` and `useChannel`
+## 如何选择 `useExtension` 与 `useChannel`
 
-Both read the same custom channel but differ in what they return:
+二者读取的是同一个 Custom Channel，但返回内容不同：
 
 | | `useExtension` | `useChannel` |
 | --- | --- | --- |
-| **Returns** | Latest payload (`T \| undefined`) | Bounded buffer of raw events (`Event[]`) |
-| **Shape** | Unwrapped, typed payload | Raw protocol events; unwrap `event.params.data` yourself |
-| **Subscribe by** | Channel name (`"redaction-stats"`) | Full channel id (`["custom:redaction-stats"]`) |
-| **Use when** | You need the current value | You need history, a log, or multiple channels |
-| **Options** | — | `bufferSize`, `replay` |
+| **返回** | 最新 Payload（`T \| undefined`） | Raw Event 的有界 Buffer（`Event[]`） |
+| **数据形态** | 已解包、带类型的 Payload | 原始 Protocol Event；需要自行解包 `event.params.data` |
+| **订阅方式** | Channel Name（`"redaction-stats"`） | 完整 Channel ID（`["custom:redaction-stats"]`） |
+| **适合场景** | 只需要当前值 | 需要历史、Log 或多个 Channel |
+| **可选参数** | — | `bufferSize`、`replay` |
 
-A common pattern is to use both on the same channel: `useExtension` drives a
-live summary (current totals), while `useChannel` backs a scrolling event log of
-every update across the thread.
+一种常见做法是在同一个 Channel 上同时使用二者：`useExtension` 驱动实时 Summary（例如当前累计计数），而 `useChannel` 为滚动 Event Log 保存整个 Thread 中的每次更新。
 
-## Use cases
+## 适用场景
 
-Custom channels fit any server-side signal that does not map cleanly to
-messages, tool calls, or graph state:
+Custom Channel 适合所有无法自然映射为 Message、Tool Call 或 Graph State 的服务端信号：
 
-- **Compliance and redaction stats**: counts of scrubbed PII, blocked content,
-  or policy hits, as in the example above.
-- **Progress reporting**: percentage complete or step labels emitted by a
-  long-running tool.
-- **Live metrics**: token usage, latency, or cost accumulating during a run.
-- **Sources and citations**: retrieved documents pushed to a side panel as the
-  agent grounds its answer.
-- **Domain events**: any structured update your backend wants to surface
-  without changing the message transcript.
+- **合规与脱敏统计**：例如上例中的 PII 清洗数量、被阻断内容数量或 Policy Hit 次数。
+- **进度汇报**：长时间运行 Tool 输出的完成百分比或 Step Label。
+- **实时指标**：一次 Run 中不断累积的 Token Usage、Latency 或 Cost。
+- **来源与引用**：Agent Grounding 回答时，把检索到的 Document 持续 Push 到侧边面板。
+- **领域事件**：后端希望暴露给前端、但又不希望改变 Message Transcript 的任意结构化更新。
 
-## Related
+## 相关内容
 
-- [Overview](/oss/langgraph/frontend/overview) — the LangGraph frontend stream
-  API and architecture.
-- [Graph execution](/oss/langgraph/frontend/graph-execution) — namespace-scoped
-  selectors for multi-node pipelines.
+- [概览](/oss/langgraph/frontend/overview) — LangGraph Frontend Stream API 与整体架构。
+- [Graph Execution](/oss/langgraph/frontend/graph-execution) — 面向多 Node Pipeline 的 Namespace-Scoped Selector。
