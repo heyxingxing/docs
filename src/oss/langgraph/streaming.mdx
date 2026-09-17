@@ -6,23 +6,23 @@ import NostreamTagPy from '/snippets/code-samples/nostream-tag-py.mdx';
 import NostreamTagJs from '/snippets/code-samples/nostream-tag-js.mdx';
 
 <Tip>
-对于新应用，我们推荐使用 [Event Streaming](/oss/langgraph/event-streaming)——这是 LangGraph v1.2 引入的类型化 Projection API。Event Streaming 为 messages、values、subgraphs、output 等 Projection 提供独立迭代器，因此无需自己根据 `stream_mode` Chunk 进行分支处理。
+对于新应用，官方更推荐使用[事件流（Event Streaming）](/oss/langgraph/event-streaming)——这是 LangGraph v1.2 引入的 Typed Projection API。Event Streaming 为 Message、Value、Subgraph、Output 等 Projection 提供彼此独立的 Iterator，因此你不需要自己在一个混合 Stream 中根据 `stream_mode` 分支处理 Chunk。
 </Tip>
 
-本页介绍 LangGraph 的 **Stream Mode API**。它通过 `updates`、`values`、`messages`、`custom`、`tools`、`checkpoints`、`tasks` 和 `debug` 等 Stream Mode 暴露 Graph Execution。需要直接访问底层 Graph Runtime Event 或特定流式输出时，可以使用这套 API。
+本页介绍 LangGraph 的 **Stream Mode API**。它通过 `updates`、`values`、`messages`、`custom`、`checkpoints`、`tasks`、`tools` 与 `debug` 等模式暴露 Graph Execution。当你需要直接消费 Runtime Event 或某种特定 Stream Output 时，可以使用这套 API。
 
 ## 快速开始
 
-### 基本用法
+### 基础用法
 
 :::python
-LangGraph 图提供 @[`stream`][Pregel.stream]（同步）和 @[`astream`][Pregel.astream]（异步）方法，并以 Iterator 形式产生流式输出。通过一个或多个 [Stream Mode](#stream-modes) 控制接收哪些数据。
+LangGraph Graph 提供同步 @[`stream`][Pregel.stream] 与异步 @[`astream`][Pregel.astream] 方法，以 Iterator 形式持续产出结果。通过一个或多个 [Stream Mode](#stream-modes) 控制希望接收的数据。
 
 ```python
 for chunk in graph.stream(
     {"topic": "ice cream"},
-    stream_mode=["updates", "custom"],  # [!code highlight]
-    version="v2",  # [!code highlight]
+    stream_mode=["updates", "custom"],
+    version="v2",
 ):
     if chunk["type"] == "updates":
         for node_name, state in chunk["data"].items():
@@ -42,11 +42,9 @@ from typing import TypedDict
 from langgraph.graph import StateGraph, START, END
 from langgraph.config import get_stream_writer
 
-
 class State(TypedDict):
     topic: str
     joke: str
-
 
 def generate_joke(state: State):
     writer = get_stream_writer()
@@ -76,8 +74,6 @@ for chunk in graph.stream(
 :::
 
 :::js
-LangGraph 图提供 @[`stream`][Pregel.stream] 方法，并以 Async Iterator 形式产生流式输出：
-
 ```typescript
 for await (const chunk of await graph.stream(inputs, {
   streamMode: "updates",
@@ -88,79 +84,130 @@ for await (const chunk of await graph.stream(inputs, {
 :::
 
 <Tip>
-使用 [LangSmith](https://smith.langchain.com) 可以调试 Streaming Event、逐 Token 检查 LLM 输出并监控延迟。参阅 [Tracing 快速入门](/langsmith/trace-with-langgraph)。
+可以使用 [LangSmith](https://smith.langchain.com) 调试 Streaming Event、检查 Token-by-token LLM Output 并监控延迟。参见 [Tracing Quickstart](/langsmith/trace-with-langgraph)。
 </Tip>
 
 :::python
-### Stream 输出格式（v2）
+### Stream Output Format（v2）
 
 <Note>
-需要 LangGraph 1.1 或更高版本。本页 Python 示例默认使用 `version="v2"`。
+需要 LangGraph 1.1 或更高版本。本页 Python 示例统一使用 `version="v2"`。
 </Note>
 
-向 `stream()` 或 `astream()` 传入 `version="v2"` 后，每一个 Chunk 都使用统一的 `StreamPart` 字典格式，无论 Stream Mode 数量和 Subgraph 设置如何：
+传入 `version="v2"` 后，无论使用多少 Stream Mode、是否启用 Subgraph，所有 Chunk 都拥有统一的 `StreamPart` Shape：
 
 ```python
 {
     "type": "values" | "updates" | "messages" | "custom" | "checkpoints" | "tasks" | "debug",
-    "ns": (),           # namespace tuple, populated for subgraph events
-    "data": ...,        # the actual payload (type varies by stream mode)
+    "ns": (),           # subgraph event 时填充 namespace path
+    "data": ...,        # payload，类型由 stream mode 决定
 }
 ```
 
-每种模式都有对应的 `TypedDict` 类型，例如 @[`ValuesStreamPart`]、@[`UpdatesStreamPart`]、@[`MessagesStreamPart`]、@[`CustomStreamPart`]、@[`CheckpointStreamPart`]、@[`TasksStreamPart`]、@[`DebugStreamPart`]。它们可以从 `langgraph.types` 导入；联合类型 @[`StreamPart`] 可根据 `part["type"]` 自动进行类型收窄。
+每种 Mode 都有对应 `TypedDict`：@[`ValuesStreamPart`]、@[`UpdatesStreamPart`]、@[`MessagesStreamPart`]、@[`CustomStreamPart`]、@[`CheckpointStreamPart`]、@[`TasksStreamPart`]、@[`DebugStreamPart`]。可以从 `langgraph.types` 导入。@[`StreamPart`] 是基于 `part["type"]` 的 Discriminated Union，因此 IDE / Type Checker 能够正确 Narrow `data` 的类型。
 
-v1 默认格式会随着设置变化：单模式返回原始数据，多模式返回 `(mode, data)`，Subgraph 又会加入 Namespace。v2 则始终保持同一种结构，因此更适合复杂消费逻辑。
-:::
+v1 的输出格式会随着 Streaming Option 改变：单 Mode 返回原始数据；多 Mode 返回 `(mode, data)`；Subgraph 返回 `(namespace, data)`。v2 始终使用同一种 Format：
 
-<a id="stream-modes"></a>
-## Stream Mode
+<CodeGroup>
+```python v2
+for chunk in graph.stream(inputs, stream_mode="updates", version="v2"):
+    print(chunk["type"])  # "updates"
+    print(chunk["ns"])    # ()
+    print(chunk["data"])  # {"node_name": {"key": "value"}}
+```
+```python v1
+for chunk in graph.stream(inputs, stream_mode="updates"):
+    print(chunk)
+```
+</CodeGroup>
 
-把 `stream_mode` / `streamMode` 传给 `stream` 或 `astream`，可以选择要流式接收的数据类型。
+v2 也支持 Type Narrowing：
 
-| 模式 | 说明 |
-| --- | --- |
-| `values` | 每个 Graph Step 后的**完整 State**。 |
-| `updates` | 每个 Node 执行后产生的 **State Update / Delta**；同一 Step 多个 Node 会分别发出。 |
-| `messages` | LLM Token 与 Message Metadata，支持逐 Token 输出。 |
-| `custom` | Node / Tool 通过 Stream Writer 主动发送的自定义数据。 |
-| `tools` | Tool Lifecycle Event 与 Tool Progress。 |
-| `checkpoints` | 每次 Checkpoint 时发出的事件，与 Checkpointer 保存的信息一致。 |
-| `tasks` | Task Start / Finish / Error Event。 |
-| `debug` | 尽可能丰富的调试信息，包括 Node、Task、Checkpoint 和完整 State。 |
-
-### `values`：完整 State
-
-`values` 会在每一个 Step 后输出整个 Graph State。State 很大时，这会产生较多数据；如果只关心变化，优先使用 `updates`。
-
-:::python
 ```python
-for chunk in graph.stream(
+for part in graph.stream(
     {"topic": "ice cream"},
-    stream_mode="values",
+    stream_mode=["values", "updates", "messages", "custom"],
     version="v2",
 ):
-    if chunk["type"] == "values":
-        print(chunk["data"])
+    if part["type"] == "values":
+        print(f"State: topic={part['data']['topic']}")
+    elif part["type"] == "updates":
+        for node_name, state in part["data"].items():
+            print(f"Node `{node_name}` updated: {state}")
+    elif part["type"] == "messages":
+        msg, metadata = part["data"]
+        print(msg.content, end="", flush=True)
+    elif part["type"] == "custom":
+        print(f"Progress: {part['data']['progress']}%")
 ```
+:::
+
+## Stream Mode
+
+:::python
+可以向 @[`stream`][CompiledStateGraph.stream] / @[`astream`][CompiledStateGraph.astream] 传入一种或多种 Mode：
+
+| Mode | Type | 说明 |
+| :--- | :--- | :--- |
+| [values](#graph-state) | @[`ValuesStreamPart`] | 每个 Step 后的完整 State。 |
+| [updates](#graph-state) | @[`UpdatesStreamPart`] | 每个 Step 的 State Update；同一 Step 多个 Update 会分别输出。 |
+| [messages](#llm-tokens) | @[`MessagesStreamPart`] | LLM Call 产生的 `(token/message chunk, metadata)`。 |
+| [custom](#custom-data) | @[`CustomStreamPart`] | Node / Tool 通过 @[`get_stream_writer`] 主动发送的任意自定义数据。 |
+| [checkpoints](#checkpoints) | @[`CheckpointStreamPart`] | Checkpoint Event；格式与 `get_state()` 类似，需要 Checkpointer。 |
+| [tasks](#tasks) | @[`TasksStreamPart`] | Task Start / Finish Event，包括 Result 与 Error，需要 Checkpointer。 |
+| [debug](#debug) | @[`DebugStreamPart`] | 尽可能完整的执行信息，组合 Checkpoint / Task 和额外 Metadata。 |
 :::
 
 :::js
-```typescript
-for await (const chunk of await graph.stream(
-  { topic: "ice cream" },
-  { streamMode: "values" }
-)) {
-  console.log(chunk);
-}
-```
+JavaScript / TypeScript 支持：
+
+| Mode | 说明 |
+| :--- | :--- |
+| [values](#graph-state) | 每个 Step 后的完整 State。 |
+| [updates](#graph-state) | 每个 Step 的 State Update。 |
+| [messages](#llm-tokens) | LLM Token 与 Metadata。 |
+| [custom](#custom-data) | `writer` 发送的自定义数据。 |
+| [tools](#tool-progress) | Tool 生命周期事件：`on_tool_start`、`on_tool_event`、`on_tool_end`、`on_tool_error`。 |
+| [debug](#debug) | Graph Execution 的完整 Debug 信息。 |
 :::
 
-### `updates`：State Update
+<a id="messages"></a>
 
-`updates` 只返回每个 Node 在该 Step 中更新的字段，而不是完整累计 State。
+### Graph State
+
+使用 `updates` 与 `values` 可以观察 Graph State 如何随执行推进：
+
+- `updates`：只输出当前 Step 的**增量更新**。
+- `values`：输出当前 Step 完成后的**完整 State Snapshot**。
 
 :::python
+```python
+from typing import TypedDict
+from langgraph.graph import StateGraph, START, END
+
+class State(TypedDict):
+  topic: str
+  joke: str
+
+def refine_topic(state: State):
+    return {"topic": state["topic"] + " and cats"}
+
+def generate_joke(state: State):
+    return {"joke": f"This is a joke about {state['topic']}"}
+
+graph = (
+  StateGraph(State)
+  .add_node(refine_topic)
+  .add_node(generate_joke)
+  .add_edge(START, "refine_topic")
+  .add_edge("refine_topic", "generate_joke")
+  .add_edge("generate_joke", END)
+  .compile()
+)
+```
+
+<Tabs>
+<Tab title="updates">
 ```python
 for chunk in graph.stream(
     {"topic": "ice cream"},
@@ -168,62 +215,108 @@ for chunk in graph.stream(
     version="v2",
 ):
     if chunk["type"] == "updates":
-        print(chunk["data"])
+        for node_name, state in chunk["data"].items():
+            print(f"Node `{node_name}` updated: {state}")
 ```
+</Tab>
+<Tab title="values">
+```python
+for chunk in graph.stream(
+    {"topic": "ice cream"},
+    stream_mode="values",
+    version="v2",
+):
+    if chunk["type"] == "values":
+        print(f"topic: {chunk['data']['topic']}, joke: {chunk['data']['joke']}")
+```
+</Tab>
+</Tabs>
 :::
 
 :::js
 ```typescript
-for await (const chunk of await graph.stream(
-  { topic: "ice cream" },
-  { streamMode: "updates" }
-)) {
-  console.log(chunk);
-}
+import { StateGraph, StateSchema, START, END } from "@langchain/langgraph";
+import { z } from "zod/v4";
+
+const State = new StateSchema({
+  topic: z.string(),
+  joke: z.string(),
+});
+
+const graph = new StateGraph(State)
+  .addNode("refineTopic", (state) => ({ topic: state.topic + " and cats" }))
+  .addNode("generateJoke", (state) => ({ joke: `This is a joke about ${state.topic}` }))
+  .addEdge(START, "refineTopic")
+  .addEdge("refineTopic", "generateJoke")
+  .addEdge("generateJoke", END)
+  .compile();
 ```
 :::
 
-### `messages`：LLM Token
+### LLM Token
 
-使用 `messages` 可以流式读取 Graph 中任意位置调用的 LangChain Chat Model Token，即使 Node 内调用的是普通 `invoke()` / `ainvoke()` 而不是 Model 自身的 Streaming API。
+`messages` Mode 可以从 Graph 任意位置——Node、Tool、Subgraph 或 Task——实时流式输出 LLM Token。
 
 :::python
-`messages` 的每个 Chunk 包含 `(message_chunk, metadata)`：
+`messages` Mode 的每个 Payload 都是 `(message_chunk, metadata)`：
+
+- `message_chunk`：LLM Token / Message Segment。
+- `metadata`：对应 Graph Node、Model Invocation 等 Metadata。
+
+如果使用的 LLM 没有 LangChain Integration，可以改用 [`custom`](#custom-data) Mode 手动转发 Token。
+
+<Warning>
+Python < 3.11 的 Async Code 需要手动把 @[`RunnableConfig`] 传给 `ainvoke()`，否则 Callback Context 无法正确传播。详情见[Python < 3.11 Async](#async)。
+</Warning>
 
 ```python
+from dataclasses import dataclass
+from langchain.chat_models import init_chat_model
+from langgraph.graph import StateGraph, START
+
+@dataclass
+class MyState:
+    topic: str
+    joke: str = ""
+
+model = init_chat_model(model="gpt-5.4-mini")
+
+def call_model(state: MyState):
+    response = model.invoke([
+        {"role": "user", "content": f"Write a joke about {state.topic}"}
+    ])
+    return {"joke": response.content}
+
+graph = StateGraph(MyState).add_node(call_model).add_edge(START, "call_model").compile()
+
 for chunk in graph.stream(
-    inputs,
+    {"topic": "ice cream"},
     stream_mode="messages",
     version="v2",
 ):
     if chunk["type"] == "messages":
-        msg, metadata = chunk["data"]
-        print(msg.content, end="", flush=True)
+        message_chunk, metadata = chunk["data"]
+        if message_chunk.content:
+            print(message_chunk.content, end="|", flush=True)
 ```
 :::
 
 :::js
 ```typescript
-for await (const [msg, metadata] of await graph.stream(
-  inputs,
-  { streamMode: "messages" }
-)) {
-  process.stdout.write(String(msg.content ?? ""));
+for await (const [messageChunk, metadata] of await graph.stream(inputs, {
+  streamMode: "messages",
+})) {
+  if (messageChunk.content) process.stdout.write(String(messageChunk.content));
 }
 ```
 :::
 
-Message Metadata 中包括触发模型调用的 Graph Node、Tag 等信息，因此可以进行过滤。
+#### 按 Metadata 过滤 LLM Token
 
-#### 按 Tag 过滤
-
-如果一个 Node 中调用多个模型，可以通过 Model Tag 只消费某一路输出：
+复杂 Graph 里可能有多个 LLM Node 并行输出 Token。可以利用 `metadata["langgraph_node"]` 只消费某个 Node 的输出。
 
 :::python
 ```python
-joke_model = init_chat_model(model="gpt-5.4-mini", tags=["joke"])
-poem_model = init_chat_model(model="gpt-5.4-mini", tags=["poem"])
-
 for chunk in graph.stream(
     {"topic": "cats"},
     stream_mode="messages",
@@ -231,8 +324,8 @@ for chunk in graph.stream(
 ):
     if chunk["type"] == "messages":
         msg, metadata = chunk["data"]
-        if metadata["tags"] == ["joke"]:
-            print(msg.content, end="", flush=True)
+        if msg.content and metadata["langgraph_node"] == "write_poem":
+            print(msg.content, end="|", flush=True)
 ```
 :::
 
@@ -242,16 +335,16 @@ for await (const [msg, metadata] of await graph.stream(
   { topic: "cats" },
   { streamMode: "messages" }
 )) {
-  if (metadata.tags?.includes("joke")) {
-    console.log(msg.content);
+  if (msg.content && metadata.langgraph_node === "writePoem") {
+    console.log(msg.content + "|");
   }
 }
 ```
 :::
 
-#### 完全从 Stream 中排除某次模型调用
+#### 使用 Tag 过滤
 
-使用 `nostream` Tag 可以让某次模型调用正常执行，但其 Token 不进入 `messages` Stream。这适合内部结构化输出，或已经通过其他 Channel 把同样内容发送给客户端的场景。
+也可以给 Model Invocation 增加 Tag，再按 Metadata 中的 Tag 过滤。这样无需把 UI 与具体 Node Name 强耦合。
 
 :::python
 <NostreamTagPy />
@@ -261,107 +354,122 @@ for await (const [msg, metadata] of await graph.stream(
 <NostreamTagJs />
 :::
 
-#### 按 Node 过滤
+### Custom Data
 
-`messages` Metadata 中的 `langgraph_node` 指向发出模型调用的 Node：
-
-:::python
-```python
-for chunk in graph.stream(
-    inputs,
-    stream_mode="messages",
-    version="v2",
-):
-    if chunk["type"] == "messages":
-        msg, metadata = chunk["data"]
-        if msg.content and metadata["langgraph_node"] == "some_node_name":
-            print(msg.content, end="", flush=True)
-```
-:::
-
-:::js
-```typescript
-for await (const [msg, metadata] of await graph.stream(
-  inputs,
-  { streamMode: "messages" }
-)) {
-  if (msg.content && metadata.langgraph_node === "some_node_name") {
-    console.log(msg.content);
-  }
-}
-```
-:::
-
-### `custom`：自定义数据
-
-可以从 Node 或 Tool 内主动把进度、状态、Artifact 等任意数据推送到 Stream。
+如果希望从 Node 或 Tool 内发送任意自定义数据，例如进度、日志、检索状态或业务 Event，可以使用 `custom` Mode。
 
 :::python
-1. 使用 @[`get_stream_writer`] 获取 Writer。
-2. 调用 `.stream()` / `.astream()` 时使用 `stream_mode="custom"`，或把 `"custom"` 加入多模式列表。
+步骤：
+
+1. 使用 @[`get_stream_writer`] 获取 Writer，并发出任意 Payload。
+2. 调用 `.stream()` / `.astream()` 时设置 `stream_mode="custom"`，或者组合 `["updates", "custom"]`。
 
 <Warning>
-Python < 3.11 的异步代码中，`get_stream_writer()` 不能依赖 ContextVar 自动传播，应把 `writer` 参数显式传入 Node / Tool。
+Python < 3.11 的 Async Code 中 @[`get_stream_writer`] 无法正常工作，应在 Node / Tool Function Signature 中显式接收 `writer: StreamWriter`。参见[Async](#async)。
 </Warning>
 
+<Tabs>
+<Tab title="node">
 ```python
+from typing import TypedDict
 from langgraph.config import get_stream_writer
+from langgraph.graph import StateGraph, START
+
+class State(TypedDict):
+    query: str
+    answer: str
 
 def node(state: State):
     writer = get_stream_writer()
-    writer({"status": "retrieving"})
-    result = do_work()
-    writer({"status": "done"})
-    return {"result": result}
+    writer({"custom_key": "Generating custom data inside node"})
+    return {"answer": "some data"}
 
-for chunk in graph.stream(inputs, stream_mode="custom", version="v2"):
+graph = StateGraph(State).add_node(node).add_edge(START, "node").compile()
+
+for chunk in graph.stream(
+    {"query": "example"},
+    stream_mode="custom",
+    version="v2",
+):
     if chunk["type"] == "custom":
         print(chunk["data"])
 ```
+</Tab>
+<Tab title="tool">
+```python
+from langchain.tools import tool
+from langgraph.config import get_stream_writer
+
+@tool
+def query_database(query: str) -> str:
+    """Query the database."""
+    writer = get_stream_writer()
+    writer({"data": "Retrieved 0/100 records", "type": "progress"})
+    # perform query
+    writer({"data": "Retrieved 100/100 records", "type": "progress"})
+    return "some-answer"
+```
+</Tab>
+</Tabs>
 :::
 
 :::js
-Node / Tool 可以通过 `LangGraphRunnableConfig.writer` 写入自定义数据：
+Node / Tool 可以使用 Runtime Config 中的 `writer`：
 
 ```typescript
 const node: GraphNode<typeof State> = async (state, config) => {
-  config.writer({ status: "retrieving" });
-  const result = await doWork();
-  config.writer({ status: "done" });
-  return { result };
+  config.writer({ custom_key: "Generating custom data inside node" });
+  return { answer: "some data" };
 };
 
-for await (const chunk of await graph.stream(inputs, {
-  streamMode: "custom",
-})) {
+for await (const chunk of await graph.stream(inputs, { streamMode: "custom" })) {
   console.log(chunk);
 }
 ```
 :::
 
-<a id="tools"></a>
-### `tools`：Tool Lifecycle 和进度
-
-`tools` 模式会输出结构化 Tool Event，包括：
-
-- `on_tool_start`
-- `on_tool_event`
-- `on_tool_end`
-- `on_tool_error`
-
-:::python
-```python
-for chunk in graph.stream(
-    {"messages": [{"role": "user", "content": "Find flights to Tokyo"}]},
-    stream_mode=["updates", "tools"],
-    version="v2",
-):
-    if chunk["type"] == "tools":
-        print(chunk["data"])
-```
-:::
-
 :::js
+### Tool Progress
+
+`tools` Stream Mode 会实时发送 Tool Execution Lifecycle Event，适合 UI 中显示 Progress、Partial Result 与 Error State。
+
+| Event | 何时触发 | Payload |
+|---|---|---|
+| `on_tool_start` | Tool Invocation 开始 | `name`、`input`、`toolCallId` |
+| `on_tool_event` | Tool 产生中间数据 | `name`、`data`、`toolCallId` |
+| `on_tool_end` | Tool 返回最终结果 | `name`、`output`、`toolCallId` |
+| `on_tool_error` | Tool 抛错 | `name`、`error`、`toolCallId` |
+
+要主动发送 `on_tool_event`，把 Tool Function 定义成 **Async Generator**：每次 `yield` 都会产生一个 Progress Event，最终 `return` Value 作为 Tool Result。
+
+```typescript
+const searchFlights = tool(
+  async function* (input) {
+    const airlines = ["United", "Delta", "American", "JetBlue"];
+    const completed: string[] = [];
+
+    for (let i = 0; i < airlines.length; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      completed.push(airlines[i]);
+      yield {
+        message: `Searching ${airlines[i]}...`,
+        progress: (i + 1) / airlines.length,
+        completed,
+      };
+    }
+
+    return JSON.stringify({ flights: [] });
+  },
+  {
+    name: "search_flights",
+    description: "Search for available flights to a destination.",
+    schema: z.object({ destination: z.string(), date: z.string() }),
+  }
+);
+```
+
+既有返回 Promise 的 Tool 完全兼容，只是只会产生 Start / End，而不会产生中间 `on_tool_event`。
+
 ```typescript
 for await (const [mode, chunk] of await graph.stream(
   { messages: [{ role: "user", content: "Find flights to Tokyo" }] },
@@ -385,61 +493,21 @@ for await (const [mode, chunk] of await graph.stream(
   }
 }
 ```
+
+前端 `useStream` 在启用 `"tools"` Mode 后会提供 `toolProgress` Array，每项包含 `name`、`state`、`toolCallId`、`input`、`data`、`result`、`error`。
+
+**`tools` vs `custom`**：
+
+- `tools`：自动产生结构化 Tool Lifecycle Event，特别适合 Tool Progress UI。
+- `custom`：完全自由的数据通道，也可以从普通 Node 发送，适合不属于 Tool Lifecycle 的业务 Event。
 :::
 
-#### 在 React 中使用 Tool Progress
+### Subgraph Output
 
-`@langchain/langgraph-sdk/react` 的 @[`useStream`] Hook 在包含 `"tools"` Stream Mode 时会暴露 `toolProgress` 数组。每个 `ToolProgress` 记录：
-
-| 字段 | 说明 |
-| --- | --- |
-| `name` | Tool 名称 |
-| `state` | `starting`、`running`、`completed` 或 `error` |
-| `toolCallId` | LLM 产生的 Tool Call ID |
-| `input` | Tool 输入参数 |
-| `data` | 最近一次 `on_tool_event` 数据 |
-| `result` | `on_tool_end` 的最终结果 |
-| `error` | `on_tool_error` 的错误 |
-
-```typescript
-import { useStream } from "@langchain/langgraph-sdk/react";
-
-function Chat() {
-  const stream = useStream({
-    assistantId: "my-agent",
-    streamMode: ["values", "tools"],
-  });
-
-  const activeTools = stream.toolProgress.filter(
-    (t) => t.state === "starting" || t.state === "running"
-  );
-
-  return (
-    <div>
-      {activeTools.map((tool) => (
-        <ToolProgressCard
-          key={tool.toolCallId ?? tool.name}
-          name={tool.name}
-          state={tool.state}
-          data={tool.data}
-        />
-      ))}
-    </div>
-  );
-}
-```
-
-`tools` 与 `custom` 都可以表达进度，但定位不同：
-
-- **`tools`**：自动提供结构化 Tool Lifecycle Event；异步生成器 Tool 可以自然地产生 Progress。
-- **`custom`**：完全自由的数据 Channel，适用于 Node Progress、UI Event 或无法映射到 Tool Lifecycle 的内容。
-
-### Subgraph 输出
-
-如果希望父图 Stream 中包含 [Subgraph](/oss/langgraph/use-subgraphs) 输出，应设置 `subgraphs=True` / `subgraphs: true`。
+如果希望 Parent Graph Stream 同时包含 [Subgraph](/oss/langgraph/use-subgraphs) Output，设置 `subgraphs=True` / `subgraphs: true`。
 
 :::python
-v2 中 Subgraph Event 与根图使用相同 `StreamPart`，通过 `ns` 判断来源：
+v2 中所有 Subgraph Event 仍然使用统一 `StreamPart` Format，区别在 `ns`：根 Graph 的 `ns=()`，Subgraph 则是类似 `("node_name:<task_id>",)` 的 Namespace Path。
 
 ```python
 for chunk in graph.stream(
@@ -466,16 +534,75 @@ for await (const chunk of await graph.stream(
 :::
 
 <Note>
-该设置适用于所有 Stream Mode，包括 `messages`。如果把 `create_agent` / `createAgent` 返回的已编译 Agent 嵌入父图，它就是 Subgraph；不打开 `subgraphs` 时，父图的 `messages` Stream 不会自动包含内层 Agent 的 Token。
+这对**所有** Stream Mode 都适用，包括 `messages`。像 `create_agent` / `createAgent` 这样的 Agent Builder 返回的是已编译 Graph；把它添加为 Parent Graph Node 后就成为 Subgraph。如果 Parent 不启用 `subgraphs=True`，Parent 的 `messages` Stream 不会自动收到内部 Agent 的 LLM Token。
 </Note>
 
-<a id="checkpoints"></a>
-### `checkpoints`
-
-如果图使用 Checkpointer 编译，`checkpoints` 模式会在创建 Checkpoint 时发出包含 State、Task、Config 和 Metadata 的事件。需要观察持久化边界、时间旅行或恢复行为时非常有用。
-
+<Accordion title="完整示例：从 Subgraph 流式输出">
 :::python
 ```python
+from langgraph.graph import START, StateGraph
+from typing import TypedDict
+
+class SubgraphState(TypedDict):
+    foo: str
+    bar: str
+
+def subgraph_node_1(state: SubgraphState):
+    return {"bar": "bar"}
+
+def subgraph_node_2(state: SubgraphState):
+    return {"foo": state["foo"] + state["bar"]}
+
+subgraph = (
+    StateGraph(SubgraphState)
+    .add_node(subgraph_node_1)
+    .add_node(subgraph_node_2)
+    .add_edge(START, "subgraph_node_1")
+    .add_edge("subgraph_node_1", "subgraph_node_2")
+    .compile()
+)
+
+class ParentState(TypedDict):
+    foo: str
+
+def node_1(state: ParentState):
+    return {"foo": "hi! " + state["foo"]}
+
+graph = (
+    StateGraph(ParentState)
+    .add_node("node_1", node_1)
+    .add_node("node_2", subgraph)
+    .add_edge(START, "node_1")
+    .add_edge("node_1", "node_2")
+    .compile()
+)
+
+for chunk in graph.stream(
+    {"foo": "foo"},
+    stream_mode="updates",
+    subgraphs=True,
+    version="v2",
+):
+    if chunk["type"] == "updates":
+        if chunk["ns"]:
+            print(f"Subgraph {chunk['ns']}: {chunk['data']}")
+        else:
+            print(f"Root: {chunk['data']}")
+```
+:::
+</Accordion>
+
+:::python
+### Checkpoint
+
+`checkpoints` Mode 会在 Graph 执行期间实时发送 Checkpoint Event，数据格式与 `get_state()` 返回的 State Snapshot 类似。需要 Graph 配置 [Checkpointer](/oss/langgraph/persistence)。
+
+```python
+from langgraph.checkpoint.memory import MemorySaver
+
+graph = builder.compile(checkpointer=MemorySaver())
+config = {"configurable": {"thread_id": "1"}}
+
 for chunk in graph.stream(
     inputs,
     config=config,
@@ -485,28 +612,14 @@ for chunk in graph.stream(
     if chunk["type"] == "checkpoints":
         print(chunk["data"])
 ```
-:::
 
-:::js
-```typescript
-for await (const chunk of await graph.stream(
-  inputs,
-  { ...config, streamMode: "checkpoints" }
-)) {
-  console.log(chunk);
-}
-```
-:::
+### Task
 
-<a id="tasks"></a>
-### `tasks`
+`tasks` Mode 会发送 Task Start / Finish Event，包括执行的 Node、Result 和 Error。也需要 [Checkpointer](/oss/langgraph/persistence)。
 
-`tasks` 模式会发出 Task Start / Finish / Error 等 Runtime Event，用于观察每个 Pregel Task 的生命周期。
-
-:::python
 ```python
 for chunk in graph.stream(
-    {"topic": "ice cream"},
+    inputs,
     config=config,
     stream_mode="tasks",
     version="v2",
@@ -517,9 +630,9 @@ for chunk in graph.stream(
 :::
 
 <a id="debug"></a>
-### `debug`
+### Debug
 
-`debug` 模式尽可能输出完整调试信息，包括 Node Name、完整 State、Checkpoint 与 Task Event。
+`debug` Mode 输出尽可能多的 Graph Execution 信息，包括 Node Name 与完整 State。
 
 :::python
 ```python
@@ -533,7 +646,7 @@ for chunk in graph.stream(
 ```
 
 <Note>
-`debug` 会把 `checkpoints` 与 `tasks` 等信息组合在一起。如果只需要某类信息，直接使用对应 Stream Mode 更高效。
+`debug` 会组合 `checkpoints` 与 `tasks` 并附带额外 Metadata。如果只需要其中一部分，直接使用 `checkpoints` 或 `tasks` 更简单。
 </Note>
 :::
 
@@ -548,27 +661,23 @@ for await (const chunk of await graph.stream(
 ```
 :::
 
-### 同时使用多个模式
+### 同时使用多个 Mode
 
 :::python
-传入模式列表即可同时消费多种数据。v2 中所有模式仍使用统一 `StreamPart`：
+给 `stream_mode` 传 List 即可：
 
 ```python
-for chunk in graph.stream(
-    inputs,
-    stream_mode=["updates", "custom"],
-    version="v2",
-):
+for chunk in graph.stream(inputs, stream_mode=["updates", "custom"], version="v2"):
     if chunk["type"] == "updates":
         print(chunk["data"])
     elif chunk["type"] == "custom":
         print(chunk["data"])
 ```
+
+v1 则返回 `(mode, chunk)` Tuple。
 :::
 
 :::js
-JavaScript 会返回 `[mode, chunk]`：
-
 ```typescript
 for await (const [mode, chunk] of await graph.stream(inputs, {
   streamMode: ["updates", "custom"],
@@ -578,11 +687,11 @@ for await (const [mode, chunk] of await graph.stream(inputs, {
 ```
 :::
 
-## 高级用法
+## 进阶
 
-### 与任意 LLM API 配合
+### 与任意 LLM 一起使用
 
-即使某个 LLM API 没有实现 LangChain Chat Model 接口，也可以使用 `custom` Stream Mode 把它自己的流式 Chunk 转发给 LangGraph Client。
+`custom` Mode 不依赖 LangChain Chat Model Interface，因此即使底层模型客户端是 OpenAI 原生 SDK、内部 HTTP Client 或其他自定义 Streaming API，也可以手动把 Token 写入 LangGraph Stream。
 
 :::python
 ```python
@@ -617,9 +726,11 @@ const callArbitraryModel: GraphNode<typeof State> = async (state, config) => {
 
 ### 对特定 Chat Model 禁用 Streaming
 
-应用可能同时使用支持 Streaming 与不支持 Streaming 的模型。可以对单个模型显式关闭 Streaming。
+如果一个应用同时使用支持 Streaming 与不支持 Streaming 的 Model，需要对不支持的 Model 显式关闭流式能力。
 
 :::python
+优先在初始化 Model 时设置 `streaming=False`：
+
 ```python
 from langchain.chat_models import init_chat_model
 
@@ -629,55 +740,140 @@ model = init_chat_model(
 )
 ```
 
-如果某个 Integration 不支持 `streaming` 参数，可以使用所有 Chat Model 基类都支持的 `disable_streaming=True`。
+如果某个 Integration 不支持 `streaming` 参数，可以使用 Base Class 提供的 `disable_streaming=True`。
 :::
 
 :::js
 ```typescript
-import { ChatOpenAI } from "@langchain/openai";
-
 const model = new ChatOpenAI({
   model: "gpt-5.5",
   streaming: false,
 });
 ```
 
-不支持 `streaming` 参数的 Integration 可以使用 `disableStreaming: true`。
+如果 Integration 不支持该参数，可以使用 `disableStreaming: true`。
 :::
 
 :::python
-### 从 v1 迁移到 v2
+### 迁移到 v2
 
-v2 的主要价值是：无论模式数量与 Subgraph 设置如何，输出统一为 `StreamPart`。
+v2 提供统一输出格式：
 
 | 场景 | v1 | v2 (`version="v2"`) |
-| --- | --- | --- |
-| 单个模式 | 原始数据 | `StreamPart`：`type` / `ns` / `data` |
-| 多个模式 | `(mode, data)` | 同一种 `StreamPart`，检查 `chunk["type"]` |
-| Subgraph | `(namespace, data)` | 同一种 `StreamPart`，检查 `chunk["ns"]` |
-| 多模式 + Subgraph | `(namespace, mode, data)` | 同一种 `StreamPart` |
-| `invoke()` | 普通 State Dict | 在对应新 API 中可获得更结构化的输出 / Interrupt 信息 |
+|---|---|---|
+| 单一 Stream Mode | 原始 Data | `StreamPart`：`type` / `ns` / `data` |
+| 多个 Stream Mode | `(mode, data)` | 同一种 `StreamPart` |
+| Subgraph Streaming | `(namespace, data)` | 同一种 `StreamPart`，检查 `ns` |
+| 多 Mode + Subgraph | `(namespace, mode, data)` | 同一种 `StreamPart` |
+| `invoke()` Return | Plain Dict | `GraphOutput`，包含 `.value` 与 `.interrupts` |
+| Interrupt（Stream） | State 中 `__interrupt__` | `values` Part 的 `interrupts` Field |
+| Interrupt（Invoke） | Result Dict 中 `__interrupt__` | `GraphOutput.interrupts` |
+| Pydantic / Dataclass | Plain Dict | 自动 Coerce 为 Model / Dataclass Instance |
 
-新代码优先使用 v2；旧代码可逐步把 Tuple Unpacking 改为根据 `type` 和 `ns` 分支。
+#### v2 Invoke Format
+
+```python
+from langgraph.types import GraphOutput
+
+result = graph.invoke(inputs, version="v2")
+
+assert isinstance(result, GraphOutput)
+result.value
+result.interrupts
+```
+
+<Warning>
+`GraphOutput` 仍暂时支持 `result["key"]`、`"key" in result` 和 `result["__interrupt__"]` 等 Dict-style Access，但这些 API 已 Deprecated。应迁移到 `result.value` 与 `result.interrupts`。
+</Warning>
+
+恢复 Interrupt：
+
+<CodeGroup>
+```python v2
+config = {"configurable": {"thread_id": "thread-1"}}
+result = graph.invoke(inputs, config=config, version="v2")
+
+if result.interrupts:
+    print(result.interrupts[0].value)
+    graph.invoke(Command(resume=True), config=config, version="v2")
+```
+```python v1
+config = {"configurable": {"thread_id": "thread-1"}}
+result = graph.invoke(inputs, config=config)
+
+if "__interrupt__" in result:
+    print(result["__interrupt__"][0].value)
+    graph.invoke(Command(resume=True), config=config)
+```
+</CodeGroup>
+
+#### Pydantic / Dataclass State Coercion
+
+v2 的 `values` Mode 会根据 Graph State Schema 自动把 Output Coerce 回 Pydantic Model / Dataclass：
+
+```python
+from pydantic import BaseModel
+from typing import Annotated
+import operator
+
+class MyState(BaseModel):
+    value: str
+    items: Annotated[list[str], operator.add]
+
+for chunk in graph.stream(
+    {"value": "x", "items": []},
+    stream_mode="values",
+    version="v2",
+):
+    print(type(chunk["data"]))  # <class 'MyState'>
+```
 :::
 
-:::python
 <a id="async"></a>
-### Async + Python < 3.11
+:::python
+### Python < 3.11 的 Async 注意事项
 
-Python < 3.11 的 `asyncio` Task 不会自动传播 Context Variable，因此异步 Node 内调用 LLM 时，要显式把 `RunnableConfig` 传给 `ainvoke()`；自定义 Streaming 则应显式接收 Writer，而不是依赖 `get_stream_writer()`。
+Python < 3.11 的 `asyncio` Task 不支持 `context` Parameter，因此 LangGraph 无法自动传播完整 Context。这会影响 Streaming：
+
+1. Async LLM Call（例如 `ainvoke()`）必须显式传 @[`RunnableConfig`]，否则 Callback 不能正确传播。
+2. Async Node / Tool 中不能使用 @[`get_stream_writer`]；必须显式接收 `writer: StreamWriter`。
+
+**手动传 Config：**
 
 ```python
 async def call_model(state, config):
-    response = await model.ainvoke(messages, config)
-    return {"response": response}
+    joke_response = await model.ainvoke(
+        [{"role": "user", "content": f"Write a joke about {state['topic']}"}],
+        config,
+    )
+    return {"joke": joke_response.content}
+
+async for chunk in graph.astream(
+    {"topic": "ice cream"},
+    stream_mode="messages",
+    version="v2",
+):
+    if chunk["type"] == "messages":
+        message_chunk, metadata = chunk["data"]
+        if message_chunk.content:
+            print(message_chunk.content, end="|", flush=True)
 ```
 
-Python 3.11+ 通常可以由 ContextVar 自动传播这些信息。
+**手动接收 Writer：**
+
+```python
+from langgraph.types import StreamWriter
+
+async def generate_joke(state: State, writer: StreamWriter):
+    writer({"custom_key": "Streaming custom data while generating a joke"})
+    return {"joke": f"This is a joke about {state['topic']}"}
+
+async for chunk in graph.astream(
+    {"topic": "ice cream"},
+    stream_mode="custom",
+    version="v2",
+):
+    if chunk["type"] == "custom":
+        print(chunk["data"])
+```
 :::
-
-## 什么时候用 Streaming，什么时候用 Event Streaming
-
-- 需要最底层 `stream_mode`、`tasks`、`checkpoints`、`debug` 等 Runtime Event：使用本页的 **Streaming**。
-- 希望分别消费 `messages`、`values`、`subgraphs`、`output`，避免手工解析 Chunk：优先使用 [Event Streaming](/oss/langgraph/event-streaming)。
-- 部署在 Agent Server 后并通过远程 Client 消费：参阅 [LangSmith Streaming API](/langsmith/streaming)。
