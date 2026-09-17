@@ -2,8 +2,8 @@
 title: GRAPH_RECURSION_LIMIT
 ---
 
-Your LangGraph @[`StateGraph`] reached the maximum number of steps before hitting a stop condition.
-This is often due to an infinite loop caused by code like the example below:
+你的 LangGraph @[`StateGraph`] 在到达停止条件之前，已经执行到了允许的最大步数。
+这通常是因为代码中存在无限循环，例如下面这种情况：
 
 :::python
 ```python
@@ -45,14 +45,14 @@ const graph = builder.compile();
 ```
 :::
 
-However, complex graphs may hit the default limit naturally.
+不过，对于本身就很复杂的图，也有可能在正常情况下自然达到默认限制。
 
-## Troubleshooting
+## 故障排查
 
-* If you are not expecting your graph to go through many iterations, you likely have a cycle. Check your logic for infinite loops.
+* 如果你并不预期图会执行很多轮，那么很可能存在一个循环。请检查控制逻辑中是否有无限循环。
 
 :::python
-* If you have a complex graph, you can pass in a higher `recursion_limit` value into your `config` object when invoking your graph like this:
+* 如果你的图确实比较复杂，可以在调用图时，通过 `config` 对象传入更高的 `recursion_limit`：
 
 ```python
 graph.invoke({...}, {"recursion_limit": 1000})
@@ -60,7 +60,7 @@ graph.invoke({...}, {"recursion_limit": 1000})
 :::
 
 :::js
-* If you have a complex graph, you can pass in a higher `recursionLimit` value into your `config` object when invoking your graph like this:
+* 如果你的图确实比较复杂，可以在调用图时，通过 `config` 对象传入更高的 `recursionLimit`：
 
 ```typescript
 await graph.invoke({...}, { recursionLimit: 1000 });
