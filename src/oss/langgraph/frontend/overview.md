@@ -1,25 +1,19 @@
 ---
-title: Overview
-description: Render LangGraph agents to the frontend
+title: 概览
+description: 在前端渲染 LangGraph 智能体
 ---
 
-Build frontends that visualize LangGraph pipelines in real time. These patterns
-show how to render multi-step graph execution with per-node status and streaming
-content from custom `StateGraph` workflows.
+构建能够实时可视化 LangGraph Pipeline 的前端。这些模式展示了如何渲染多步骤 Graph Execution、每个节点的状态，以及来自自定义 `StateGraph` 工作流的流式内容。
 
-LangGraph's frontend advantage is that the UI can follow the same structure as
-the graph. Nodes, state keys, checkpoints, interrupts, subgraphs, and streamed
-messages are all visible runtime concepts, so you can build interfaces that
-explain what the system is doing instead of hiding execution behind one
-assistant message.
+LangGraph 在前端上的一个重要优势，是 UI 可以直接沿用图本身的结构。Node、State Key、Checkpoint、Interrupt、Subgraph 和流式 Message 都是运行时可见的一等概念，因此你可以构建能够解释“系统正在做什么”的界面，而不是把所有执行过程都隐藏在一条 Assistant Message 后面。
 
 <Note>
-These patterns use the v1 frontend SDK packages. If you are using an earlier version, see the migration guides for [React](https://github.com/langchain-ai/langgraphjs/blob/main/libs/sdk-react/docs/v1-migration.md), [Vue](https://github.com/langchain-ai/langgraphjs/blob/main/libs/sdk-vue/docs/v1-migration.md), [Svelte](https://github.com/langchain-ai/langgraphjs/blob/main/libs/sdk-svelte/docs/v1-migration.md), and [Angular](https://github.com/langchain-ai/langgraphjs/blob/main/libs/sdk-angular/docs/v1-migration.md).
+这些模式使用 v1 版前端 SDK Package。如果你仍在使用更早版本，请参考 [React](https://github.com/langchain-ai/langgraphjs/blob/main/libs/sdk-react/docs/v1-migration.md)、[Vue](https://github.com/langchain-ai/langgraphjs/blob/main/libs/sdk-vue/docs/v1-migration.md)、[Svelte](https://github.com/langchain-ai/langgraphjs/blob/main/libs/sdk-svelte/docs/v1-migration.md) 和 [Angular](https://github.com/langchain-ai/langgraphjs/blob/main/libs/sdk-angular/docs/v1-migration.md) 的迁移指南。
 </Note>
 
-## Architecture
+## 架构
 
-LangGraph graphs are composed of named nodes connected by edges. Each node executes a step (classify, research, analyze, synthesize) and writes output to a specific state key. On the frontend, the SDK stream handle provides reactive access to node outputs, streaming tokens, and discovered subgraphs so you can map each node to a UI card.
+LangGraph 的图由通过 Edge 连接起来的命名 Node 组成。每个 Node 执行一个步骤（例如分类、研究、分析、综合），并把结果写入某个特定的 State Key。在前端，SDK 的 Stream Handle 会以响应式方式暴露节点输出、流式 Token，以及运行时发现的 Subgraph，因此你可以很自然地把每个节点映射为一张 UI 卡片。
 
 ```mermaid
 %%{
@@ -106,11 +100,7 @@ const graph = new StateGraph(State)
 
 :::
 
-On the frontend, @[`useStream`] exposes `stream.subgraphs` for graph-node discovery
-and selector helpers such as `useMessages(stream, node)` for node-scoped
-streaming content. `stream.values` still holds the full graph state when you
-need fields such as the final `synthesis`. Angular uses the same stream API
-shape through @[`injectStream`].
+在前端，@[`useStream`] 会通过 `stream.subgraphs` 暴露可用于发现 Graph Node 的 Subgraph 信息，并提供类似 `useMessages(stream, node)` 这样的 Selector Helper，用于读取某个特定 Node 的流式内容。当你需要最终的 `synthesis` 等完整 Graph State 字段时，仍然可以通过 `stream.values` 获取。Angular 通过 @[`injectStream`] 使用同样形态的 Stream API。
 
 ```ts
 import { useStream } from "@langchain/react";
@@ -128,35 +118,32 @@ function Pipeline() {
 }
 ```
 
-## What makes this different from a chat stream
+## 它与普通 Chat Stream 有什么不同
 
-Custom graphs often power product workflows: research pipelines, approval flows,
-data pipelines, data enrichment, code review, planning, and multi-step analysis. The
-frontend SDK lets you render these workflows using graph-native signals:
+自定义 Graph 往往用于驱动真正的产品工作流，例如研究 Pipeline、审批流、数据 Pipeline、数据增强、代码审查、规划和多步骤分析。Frontend SDK 允许你直接使用图原生的运行时信号来渲染这些流程：
 
-| Runtime concept | Frontend UX |
+| 运行时概念 | 前端 UX |
 | --- | --- |
-| **Named nodes** | One card, timeline step, or status badge per graph node. |
-| **State keys** | Dedicated UI regions for typed outputs such as classification, sources, analysis, and final synthesis. |
-| **Streaming metadata** | Route partial messages to the node that produced them. |
-| **Checkpoints** | Inspect or resume from prior graph states for debugging and auditability. |
-| **Interrupts** | Pause a node for human input, approval, or correction, then continue. |
-| **Subgraphs** | Reveal nested execution only when the user needs more detail. |
+| **命名 Node** | 为每个 Graph Node 展示一张卡片、时间线步骤或状态 Badge。 |
+| **State Key** | 为分类、来源、分析、最终综合结果等类型化输出提供独立 UI 区域。 |
+| **Streaming Metadata** | 把部分流式 Message 路由到真正生成它的 Node。 |
+| **Checkpoint** | 为调试和审计检查历史 Graph State，或从历史状态恢复执行。 |
+| **Interrupt** | 在某个 Node 暂停，等待人工输入、审批或修正，然后继续执行。 |
+| **Subgraph** | 只在用户确实需要更多细节时，展开嵌套执行过程。 |
 
-Because the SDK exposes these concepts directly, you can scale from a simple
-chat panel to a full workflow debugger without changing the backend protocol.
+由于 SDK 直接暴露这些概念，你可以从一个简单 Chat Panel 逐步扩展到完整的 Workflow Debugger，而无需改变后端协议。
 
-## Patterns
+## 模式
 
 <CardGroup cols={2}>
-  <Card title="Graph execution" icon="chart-dots" href="/oss/langgraph/frontend/graph-execution">
-    Visualize multi-step graph pipelines with per-node status and streaming content.
+  <Card title="Graph Execution" icon="chart-dots" href="/oss/langgraph/frontend/graph-execution">
+    可视化多步骤 Graph Pipeline，包括每个 Node 的状态和流式内容。
   </Card>
-  <Card title="Custom stream channels" icon="broadcast" href="/oss/langgraph/frontend/custom-stream-channels">
-    Stream custom server-side data to the frontend and read it with `useExtension` and `useChannel`.
+  <Card title="自定义 Stream Channel" icon="broadcast" href="/oss/langgraph/frontend/custom-stream-channels">
+    把服务端自定义数据流式传到前端，并通过 `useExtension` 和 `useChannel` 读取。
   </Card>
 </CardGroup>
 
-## Related patterns
+## 相关模式
 
-The [LangChain frontend patterns](/oss/langchain/frontend/overview)—markdown messages, tool calling, human-in-the-loop, resumable streams, and time travel—work with any LangGraph graph. The stream API provides the same core data model whether you use `createAgent`, `createDeepAgent`, or a custom `StateGraph`.
+[LangChain 前端模式](/oss/langchain/frontend/overview)中的 Markdown Message、工具调用、人在回路、可恢复 Stream 和时间旅行，都可以与任意 LangGraph 图一起使用。无论后端使用 `createAgent`、`createDeepAgent` 还是自定义 `StateGraph`，Stream API 都提供相同的核心数据模型。
