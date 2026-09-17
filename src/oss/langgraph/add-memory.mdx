@@ -30,7 +30,7 @@ Store
 <a id="add-short-term-memory"></a>
 ## 添加短期记忆
 
-短期记忆本质上就是**持久化 Graph State**。使用 Checkpointer 编译 Graph 后，LangGraph 会在每个 Super-step 保存 Checkpoint；后续使用相同 `thread_id` 调用时，会在原 State 基础上继续执行。
+短期记忆本质上就是**持久化 Graph State**。使用 Checkpointer 编译 Graph 后，LangGraph 会在每个 Superstep 保存 Checkpoint；后续使用相同 `thread_id` 调用时，会在原 State 基础上继续执行。
 
 :::python
 ```python
@@ -104,14 +104,16 @@ await graph.invoke(
 第二次 Invocation 使用同一个 Thread，因此模型可以看到前一轮消息。
 
 <Info>
-`InMemorySaver` 适合本地开发和测试。生产环境应使用持久化 Checkpointer，例如 PostgreSQL、MongoDB、Redis 或其他官方集成。参阅 [Checkpointer](/oss/langgraph/checkpointers)。
+`InMemorySaver` / `MemorySaver` 适合本地开发和测试。生产环境应使用数据库支持的持久化 Checkpointer。
 </Info>
 
 ## 使用生产 Checkpointer
 
-:::python
-以 PostgreSQL 为例：
+LangGraph 提供多个数据库后端的 Checkpointer Package。数据库后端通常需要第一次运行时执行 `setup()` 来创建表、索引或其他 Schema。
 
+### PostgreSQL
+
+:::python
 ```bash
 pip install -U langgraph-checkpoint-postgres
 ```
@@ -122,13 +124,61 @@ from langgraph.checkpoint.postgres import PostgresSaver
 DB_URI = "postgresql://postgres:postgres@localhost:5442/postgres?sslmode=disable"
 
 with PostgresSaver.from_conn_string(DB_URI) as checkpointer:
-    # First-time setup creates required tables.
+    checkpointer.setup()
+    graph = builder.compile(checkpointer=checkpointer)
+```
+
+异步应用使用 `AsyncPostgresSaver`。
+:::
+
+:::js
+```bash
+npm install @langchain/langgraph-checkpoint-postgres
+```
+
+```typescript
+import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
+
+const checkpointer = PostgresSaver.fromConnString(DB_URI);
+await checkpointer.setup();
+const graph = builder.compile({ checkpointer });
+```
+:::
+
+### MongoDB
+
+:::python
+```bash
+pip install -U langgraph-checkpoint-mongodb
+```
+
+```python
+from pymongo import MongoClient
+from langgraph.checkpoint.mongodb import MongoDBSaver
+
+client = MongoClient(MONGO_URI)
+checkpointer = MongoDBSaver(client)
+graph = builder.compile(checkpointer=checkpointer)
+```
+:::
+
+### Redis
+
+:::python
+```bash
+pip install -U langgraph-checkpoint-redis
+```
+
+```python
+from langgraph.checkpoint.redis import RedisSaver
+
+with RedisSaver.from_conn_string(REDIS_URI) as checkpointer:
     checkpointer.setup()
     graph = builder.compile(checkpointer=checkpointer)
 ```
 :::
 
-其他后端请参阅 [Checkpointer 集成](/oss/integrations/checkpointers/index)。
+其他后端参见 [Checkpointer 集成](/oss/integrations/checkpointers/index) 与 [Checkpointer 指南](/oss/langgraph/checkpointers)。
 
 ## Thread 是短期记忆的边界
 
@@ -170,7 +220,7 @@ for await (const checkpoint of graph.getStateHistory(config)) {
 ```
 :::
 
-可以使用 [时间旅行](/oss/langgraph/use-time-travel) Replay 或 Fork 历史 Checkpoint。
+可以使用[时间旅行](/oss/langgraph/use-time-travel) Replay 或 Fork 历史 Checkpoint。
 
 ## 为什么需要管理消息历史
 
@@ -294,7 +344,6 @@ def summarize_conversation(state: State):
         state["messages"] + [HumanMessage(content=prompt)]
     )
 
-    # Keep the latest messages and delete older raw history.
     delete_messages = [
         RemoveMessage(id=m.id)
         for m in state["messages"][:-4]
@@ -323,15 +372,15 @@ def call_model(state: State):
 
 ### 摘要策略的权衡
 
-摘要可以大幅降低 Context 长度，但会带来信息损失。不要把：
+摘要可以大幅降低 Context 长度，但会带来信息损失。不要把以下信息**只**保存在自由文本摘要中：
 
 - 精确 ID；
 - 数值；
 - 合同条款；
 - 用户明确约束；
-- 尚未完成的 Task State；
+- 尚未完成的 Task State。
 
-只保存在自由文本摘要中。对这类信息，最好使用结构化 State Field 或长期 Memory。
+这类信息更适合结构化 State Field 或长期 Store。
 
 ## 在 Node 内读取短期 State
 
@@ -375,17 +424,15 @@ const graph = builder.compile({
 ```
 :::
 
-生产环境应使用持久化 Store 后端。
+生产环境应使用持久化 Store 后端，例如 PostgreSQL / Redis / MongoDB 对应 Store 实现。
 
 ## Namespace
 
-Store 中的每条 Memory 都由：
+Store 中的每条 Memory 都由以下三部分共同定位：
 
 - Namespace；
 - Key；
-- Value；
-
-共同定位。
+- Value。
 
 常见设计：
 
@@ -401,7 +448,7 @@ namespace = (user_id, "memories")
 (organization_id, "shared_knowledge")
 ```
 
-Namespace 是长期 Memory 的数据模型设计，不要把所有信息都扔到一个扁平空间。
+Namespace 是长期 Memory 的数据模型设计，不要把所有信息都扔进一个扁平空间。
 
 ## 写入长期 Memory
 
@@ -462,6 +509,33 @@ def call_model(state: State, runtime: Runtime):
 
 这允许新 Thread 使用旧 Thread 保存的信息。
 
+## 使用 Semantic Search 检索 Memory
+
+Store 可以配置 Embedding，使 `search()` 根据当前 Query 找到语义相关 Memory，而不是把整个 Namespace 全部塞进 Prompt。
+
+:::python
+```python
+from langchain.embeddings import init_embeddings
+from langgraph.store.memory import InMemoryStore
+
+store = InMemoryStore(
+    index={
+        "embed": init_embeddings("openai:text-embedding-3-small"),
+        "dims": 1536,
+        "fields": ["memory"],
+    }
+)
+
+results = store.search(
+    (user_id, "memories"),
+    query=state["messages"][-1].content,
+    limit=3,
+)
+```
+:::
+
+`fields` 决定 Memory Value 中哪些字段参与 Embedding。生产系统应控制 Memory 检索的 Token Budget，而不是“能召回多少就放多少”。
+
 <a id="manage-long-term-memory"></a>
 ## 管理长期记忆
 
@@ -507,36 +581,7 @@ def call_model(state: State, runtime: Runtime):
 
 “应该怎么做”的规则，例如 Workflow、Skill、Prompt 或操作规范。这类 Memory 往往不应该由普通对话模型直接随意修改，而需要更严格的验证与版本控制。
 
-## 语义搜索长期 Memory
-
-Store 可以配置 Embedding，实现语义搜索。
-
-:::python
-```python
-from langchain.embeddings import init_embeddings
-from langgraph.store.memory import InMemoryStore
-
-store = InMemoryStore(
-    index={
-        "embed": init_embeddings("openai:text-embedding-3-small"),
-        "dims": 1536,
-        "fields": ["memory"],
-    }
-)
-```
-
-```python
-results = store.search(
-    (user_id, "memories"),
-    query=state["messages"][-1].content,
-    limit=3,
-)
-```
-:::
-
-这样不需要把全部 Memory 都塞进 Context，只检索当前问题最相关的几条。
-
-## 精确读取与更新 Memory
+## 精确读取、更新和删除 Memory
 
 如果已经知道 Key，直接使用 `get`：
 
@@ -554,19 +599,17 @@ store.put(
 )
 ```
 
-这比每次创建新 Memory 更适合“当前用户偏好”这类单值事实。
-
-## 删除 Memory
+删除：
 
 ```python
 store.delete((user_id, "memories"), memory_id)
 ```
 
-生产系统应提供 Memory 生命周期管理，而不是只会添加、永不删除。
+这比每次创建新 Memory 更适合“当前用户偏好”这类单值事实。生产系统应提供 Memory 生命周期管理，而不是只会添加、永不删除。
 
-## 在 Hot Path 中更新 Memory
+## Hot Path 与后台 Memory 更新
 
-**Hot Path** 指用户请求执行过程中立即写 Memory：
+### 在 Hot Path 中更新
 
 ```text
 用户输入
@@ -578,21 +621,9 @@ Agent 识别重要事实
 继续回答
 ```
 
-优点：
+优点：新信息立即可用、实现简单。缺点：增加延迟，模型容易把不成熟推断直接长期化，而且 Memory Extraction 会消耗主请求 Token。
 
-- 新信息立即可用；
-- 实现简单；
-- 无需额外后台系统。
-
-缺点：
-
-- 增加用户请求延迟；
-- 模型容易把不成熟推断直接长期化；
-- Memory Extraction 会占用主 Context 和 Token。
-
-## 在后台更新 Memory
-
-另一种方式是在主请求结束后异步抽取 Memory：
+### 在后台更新
 
 ```text
 用户请求 → 正常回答
@@ -604,27 +635,20 @@ Agent 识别重要事实
              Store
 ```
 
-优点：
+优点：不阻塞主请求，可以批量去重、冲突解决，并使用专用 Memory Model / Prompt。缺点是 Memory 不会立即可用，系统也更复杂。
 
-- 不阻塞用户请求；
-- 可以批量处理、去重、冲突解决；
-- 可以使用专用 Memory Model / Prompt；
-- 更容易加入审核和质量控制。
-
-缺点是新 Memory 不会立即可用，系统也更复杂。
-
-真实生产系统经常混合两者：关键显式偏好在 Hot Path 立即写入，其余对话经验后台整理。
+真实生产系统经常混合两者：显式、关键偏好在 Hot Path 立即写，其余对话经验在后台整理。
 
 ## Memory Extraction
 
-不要简单把每条用户消息都存进长期 Store。更合理的做法是让模型先判断：
+不要简单把每条用户消息都存进长期 Store。更合理的做法是先判断：
 
 1. 这是稳定事实还是当前临时上下文？
 2. 是否已经存在同类 Memory？
 3. 应新增、更新、合并还是忽略？
-4. Memory 是否来自用户明确陈述，还是模型推断？
+4. Memory 来自用户明确陈述，还是模型推断？
 
-例如可以要求模型输出结构化操作：
+例如要求模型输出结构化操作：
 
 ```json
 {
@@ -639,8 +663,6 @@ Agent 识别重要事实
 
 ## 在 Tool 中访问 Memory
 
-Tool 也可以使用 Runtime Store。例如搜索用户偏好：
-
 :::python
 ```python
 from langchain.tools import tool, ToolRuntime
@@ -653,7 +675,7 @@ def get_user_preferences(runtime: ToolRuntime) -> str:
 ```
 :::
 
-这让 Tool 可以访问长期上下文，而不需要把全部 Memory 放入模型 Prompt。
+这样 Tool 可以访问长期上下文，而不需要把全部 Memory 放入模型 Prompt。
 
 ## Store 与 State 的选择
 
@@ -673,8 +695,6 @@ def get_user_preferences(runtime: ToolRuntime) -> str:
 ## Memory 与 RAG 的区别
 
 RAG 通常检索一个相对稳定、外部构建的知识库；Agent Memory 通常来自智能体与用户过去的交互，并会持续演化。
-
-二者可以使用类似的 Embedding / Vector Search 技术，但数据来源与生命周期不同：
 
 ```text
 RAG
@@ -700,15 +720,130 @@ Memory
 
 这可以避免长期 Store 变成新的“上下文垃圾场”。
 
+## 管理 Checkpoint
+
+可以直接查看、遍历和删除 Checkpointer 中保存的信息。
+
+<a id="checkpoint"></a>
+### 查看 Thread 当前 State
+
+:::python
+<Tabs>
+<Tab title="Graph / Functional API">
+```python
+config = {
+    "configurable": {
+        "thread_id": "1",
+        # 可选：指定具体 checkpoint_id；否则读取最新 Checkpoint
+        # "checkpoint_id": "1f029ca3-1f5b-6704-8004-820c16b69a5a",
+    }
+}
+
+snapshot = graph.get_state(config)
+print(snapshot.values)
+```
+</Tab>
+<Tab title="Checkpointer API">
+```python
+checkpoint_tuple = checkpointer.get_tuple(config)
+print(checkpoint_tuple.checkpoint)
+```
+</Tab>
+</Tabs>
+:::
+
+:::js
+```typescript
+const config = {
+  configurable: {
+    thread_id: "1",
+    // checkpoint_id: "...",
+  },
+};
+
+const snapshot = await graph.getState(config);
+console.log(snapshot.values);
+```
+:::
+
+<a id="checkpoints"></a>
+### 查看 Thread 历史
+
+:::python
+<Tabs>
+<Tab title="Graph / Functional API">
+```python
+config = {"configurable": {"thread_id": "1"}}
+
+for snapshot in graph.get_state_history(config):
+    print(snapshot.config["configurable"]["checkpoint_id"])
+    print(snapshot.values)
+```
+</Tab>
+<Tab title="Checkpointer API">
+```python
+for item in checkpointer.list(config):
+    print(item.config)
+    print(item.checkpoint)
+```
+</Tab>
+</Tabs>
+:::
+
+:::js
+```typescript
+const config = { configurable: { thread_id: "1" } };
+for await (const snapshot of graph.getStateHistory(config)) {
+  console.log(snapshot.config.configurable?.checkpoint_id);
+  console.log(snapshot.values);
+}
+```
+:::
+
+### 删除 Thread
+
+如果希望删除某个 Thread 的全部 Checkpoint：
+
+:::python
+```python
+thread_id = "1"
+checkpointer.delete_thread(thread_id)
+```
+:::
+
+:::js
+```typescript
+const threadId = "1";
+await checkpointer.deleteThread(threadId);
+```
+:::
+
+<Warning>
+删除 Thread 是持久化层操作。生产环境应确认权限、审计与数据保留策略，再允许用户或应用执行删除。
+</Warning>
+
+## 数据库管理
+
+使用任何数据库支持的持久化实现（Postgres、Redis、Oracle 等）保存短期或长期 Memory 时，通常需要先运行 Migration，创建所需 Schema。
+
+按照约定，大多数数据库特定 Library 会在 Checkpointer 或 Store Instance 上提供 `setup()` 方法来运行 Migration，但具体方法名和行为取决于对应 @[`BaseCheckpointSaver`] / @[`BaseStore`] 实现。
+
+推荐两种做法：
+
+- 把 Migration 作为 Deployment Pipeline 中的独立步骤；
+- 或者在 Server Startup 时确保它已经执行。
+
+不要在每次用户请求中重复运行 `setup()`。
+
 ## 生产环境注意事项
 
 ### 隔离
 
-Namespace 必须包含可靠的 Tenant / User Boundary。不要让模型自己提供未验证的用户 ID，从而访问其他用户 Memory。
+Namespace 必须包含可靠的 Tenant / User Boundary。不要让模型自己提供未经验证的 User ID，从而访问其他用户 Memory。
 
 ### 隐私
 
-长期 Memory 可能包含用户数据。应设计：
+长期 Memory 可能包含用户数据，应设计：
 
 - 删除与导出能力；
 - 数据保留周期；
@@ -718,14 +853,7 @@ Namespace 必须包含可靠的 Tenant / User Boundary。不要让模型自己�
 
 ### 冲突解决
 
-用户偏好可能改变：
-
-```text
-旧：用户喜欢每天早上 8 点提醒
-新：用户改成 9 点
-```
-
-这类数据应更新同一个稳定 Key，而不是累积两个互相冲突的事实。
+用户偏好会变化。对于“当前值”类型的数据，应更新一个稳定 Key，而不是累积相互冲突的多个事实。
 
 ### 可信度
 
@@ -739,7 +867,7 @@ Namespace 必须包含可靠的 Tenant / User Boundary。不要让模型自己�
 
 ## 与 LangSmith 配合
 
-[LangSmith](/langsmith/observability) 可以帮助你检查：
+[LangSmith](/langsmith/observability) 可以帮助检查：
 
 - 每次模型调用使用了哪些历史消息；
 - 检索了哪些长期 Memory；
@@ -750,8 +878,6 @@ Namespace 必须包含可靠的 Tenant / User Boundary。不要让模型自己�
 Memory 系统应该被评估，而不是仅凭“看起来更个性化”判断效果。
 
 ## 推荐架构
-
-一个常见生产 Agent Memory 架构：
 
 ```text
                     ┌───────────────┐
@@ -780,7 +906,7 @@ Memory 系统应该被评估，而不是仅凭“看起来更个性化”判断�
 ## 下一步
 
 - [持久化](/oss/langgraph/persistence)：理解短期 State、Thread 与 Checkpoint。
-- [Checkpointer](/oss/langgraph/checkpointers)：选择生产持久化后端。
+- [Checkpointer](/oss/langgraph/checkpointers)：选择生产持久化后端，并理解 Checkpoint Lifecycle。
 - [Store](/oss/langgraph/stores)：深入长期 Memory API 与语义搜索。
 - [中断](/oss/langgraph/interrupts)：在 Memory Mutation 前加入人工审核。
 - [LangChain Memory 概念](/oss/concepts/memory)：了解 Agent Memory 的整体设计。
