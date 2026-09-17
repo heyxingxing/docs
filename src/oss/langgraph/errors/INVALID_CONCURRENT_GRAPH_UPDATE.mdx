@@ -2,11 +2,9 @@
 title: INVALID_CONCURRENT_GRAPH_UPDATE
 ---
 
-A LangGraph @[`StateGraph`] received concurrent updates to its state from multiple nodes to a state property that doesn't
-support it.
+LangGraph @[`StateGraph`] 收到了来自多个节点的并发状态更新，但被更新的 State 字段并不支持这种并发写入。
 
-One way this can occur is if you are using a [fanout](/oss/langgraph/use-graph-api#map-reduce-and-the-send-api)
-or other parallel execution in your graph and you have defined a graph like this:
+一种常见情况是：你的图使用了[扇出（fanout）](/oss/langgraph/use-graph-api#map-reduce-and-the-send-api)或其他并行执行方式，同时又定义了类似下面这样的 State：
 
 :::python
 ```python
@@ -57,18 +55,16 @@ const graph = builder.compile();
 :::
 
 :::python
-If a node in the above graph returns `{ "some_key": "some_string_value" }`, this will overwrite the state value for `"some_key"` with `"some_string_value"`.
-However, if multiple nodes in e.g. a fanout within a single step return values for `"some_key"`, the graph will throw this error because
-there is uncertainty around how to update the internal state.
+如果上面图中的某一个节点返回 `{ "some_key": "some_string_value" }`，它会把 State 中 `"some_key"` 的值覆盖为 `"some_string_value"`。
+但如果同一个 Step 内的多个并行节点（例如 fanout 分支）都返回了 `"some_key"`，LangGraph 就无法确定应该如何合并这些更新，因此会抛出此错误。
 :::
 
 :::js
-If a node in the above graph returns `{ someKey: "some_string_value" }`, this will overwrite the state value for `someKey` with `"some_string_value"`.
-However, if multiple nodes in e.g. a fanout within a single step return values for `someKey`, the graph will throw this error because
-there is uncertainty around how to update the internal state.
+如果上面图中的某一个节点返回 `{ someKey: "some_string_value" }`，它会把 State 中 `someKey` 的值覆盖为 `"some_string_value"`。
+但如果同一个 Step 内的多个并行节点（例如 fanout 分支）都返回了 `someKey`，LangGraph 就无法确定应该如何合并这些更新，因此会抛出此错误。
 :::
 
-To get around this, you can define a reducer that combines multiple values:
+要解决这个问题，可以为该字段定义一个能够合并多个值的 Reducer：
 
 :::python
 ```python
@@ -98,10 +94,10 @@ const State = new StateSchema({  // [!code highlight]
 ```
 :::
 
-This will allow you to define logic that handles the same key returned from multiple nodes executed in parallel.
+这样就可以显式定义：当多个并行节点返回同一个 State Key 时，应该如何合并它们的结果。
 
-## Troubleshooting
+## 故障排查
 
-The following may help resolve this error:
+以下做法通常可以解决这个错误：
 
-* If your graph executes nodes in parallel, make sure you have defined relevant state keys with a reducer.
+* 如果你的图会并行执行多个节点，请确保所有可能被并发更新的 State Key 都定义了合适的 Reducer。
