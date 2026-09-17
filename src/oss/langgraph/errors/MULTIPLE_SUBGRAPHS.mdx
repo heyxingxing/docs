@@ -2,43 +2,43 @@
 title: MULTIPLE_SUBGRAPHS
 ---
 
-This error occurs when you [call a subgraph inside a node](/oss/langgraph/use-subgraphs#call-a-subgraph-inside-a-node) multiple times, and the subgraph is compiled with `checkpointer=True` (continuations mode).
+当你在同一个节点中[多次调用子图](/oss/langgraph/use-subgraphs#call-a-subgraph-inside-a-node)，并且该子图使用 `checkpointer=True`（continuations 模式）进行编译时，会出现这个错误。
 
-## Troubleshooting
+## 故障排查
 
-Choose one of the following based on your requirements:
+请根据实际需求选择下面一种方式：
 
 :::python
-1. **Don't need interrupts?** Use `checkpointer=False` to opt out of checkpointing entirely:
+1. **不需要中断（interrupt）？** 使用 `checkpointer=False`，完全关闭该子图的 Checkpoint：
    ```python
    subgraph = subgraph_builder.compile(checkpointer=False)
    ```
 
-2. **Need interrupts but not cross-invocation persistence?** Use the default inherited mode by omitting `checkpointer`:
+2. **需要中断，但不需要跨多次调用持久化？** 省略 `checkpointer`，使用默认的继承模式：
    ```python
    subgraph = subgraph_builder.compile()
    ```
-   Each invocation gets a unique namespace, so parallel execution works. The subgraph starts fresh each time but can use `interrupt()`.
+   每次调用都会获得唯一的命名空间，因此可以安全地并行执行。子图每次都会从新状态开始，但仍然可以使用 `interrupt()`。
 
-3. **Need cross-invocation persistence?** Use `checkpointer=True`. LangGraph assigns each invocation a position-based namespace suffix (`calling_node`, `calling_node|1`, etc.) to prevent conflicts. For stable, name-based namespaces, wrap each subgraph with a unique node name — see [parallel subgraphs](/oss/langgraph/use-subgraphs#subgraph-persistence).
+3. **需要跨多次调用持久化？** 使用 `checkpointer=True`。LangGraph 会为每次调用分配基于位置的命名空间后缀（例如 `calling_node`、`calling_node|1` 等），以避免冲突。如果希望使用稳定的、基于名称的命名空间，请用具有唯一节点名的节点分别包裹各个子图；参见[并行子图](/oss/langgraph/use-subgraphs#subgraph-persistence)。
 :::
 
 :::js
-1. **Don't need interrupts?** Use `checkpointer: false` to opt out of checkpointing entirely:
+1. **不需要中断（interrupt）？** 使用 `checkpointer: false`，完全关闭该子图的 Checkpoint：
    ```typescript
    const subgraph = subgraphBuilder.compile({ checkpointer: false });
    ```
 
-2. **Need interrupts but not cross-invocation persistence?** Use the default inherited mode by omitting `checkpointer`:
+2. **需要中断，但不需要跨多次调用持久化？** 省略 `checkpointer`，使用默认的继承模式：
    ```typescript
    const subgraph = subgraphBuilder.compile();
    ```
-   Each invocation gets a unique namespace, so parallel execution works. The subgraph starts fresh each time but can use `interrupt()`.
+   每次调用都会获得唯一的命名空间，因此可以安全地并行执行。子图每次都会从新状态开始，但仍然可以使用 `interrupt()`。
 
-3. **Need cross-invocation persistence?** Use `checkpointer: true`. LangGraph assigns each invocation a position-based namespace suffix (`calling_node`, `calling_node|1`, etc.) to prevent conflicts. For stable, name-based namespaces, wrap each subgraph with a unique node name — see [parallel subgraphs](/oss/langgraph/use-subgraphs#subgraph-persistence).
+3. **需要跨多次调用持久化？** 使用 `checkpointer: true`。LangGraph 会为每次调用分配基于位置的命名空间后缀（例如 `calling_node`、`calling_node|1` 等），以避免冲突。如果希望使用稳定的、基于名称的命名空间，请用具有唯一节点名的节点分别包裹各个子图；参见[并行子图](/oss/langgraph/use-subgraphs#subgraph-persistence)。
 :::
 
-## Related
+## 相关内容
 
-- [Subgraph persistence](/oss/langgraph/use-subgraphs#subgraph-persistence) — full comparison of checkpointer modes
-- [Persistence](/oss/langgraph/persistence) — how checkpointers work in LangGraph
+- [子图持久化](/oss/langgraph/use-subgraphs#subgraph-persistence) — Checkpointer 各种模式的完整比较
+- [持久化](/oss/langgraph/persistence) — LangGraph 中 Checkpointer 的工作方式
