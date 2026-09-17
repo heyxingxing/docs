@@ -1,851 +1,3104 @@
 ---
 title: 使用 Graph API
 sidebarTitle: 使用 Graph API
-description: 使用 StateGraph 定义 State、Node、Edge、Reducer、并行分支、动态路由、Runtime Context、缓存与可视化。
 ---
 
-Graph API 用显式的 **State + Node + Edge** 描述工作流。它适合需要复杂分支、并行执行、共享状态、可视化拓扑以及精细控制 Runtime 行为的智能体系统。
+import ChatModelTabs from '/snippets/chat-model-tabs.mdx';
 
-本页集中介绍最常用的 Graph API 实践模式。概念性说明参阅 [Graph API 概览](/oss/langgraph/graph-api)。
+本指南介绍 LangGraph Graph API 的基础用法。内容包括如何定义和更新 [State](#define-and-update-state)，以及如何组合常见的 Graph Structure，例如[顺序执行](#create-a-sequence-of-steps)、[分支](#create-branches)与[循环](#create-and-control-loops)。同时也会介绍 LangGraph 的控制能力，包括用于 Map-Reduce Workflow 的 [Send API](#map-reduce-and-the-send-api)，以及用于把 State Update 与跨 Node 跳转组合在一起的 [Command API](#combine-control-flow-and-state-updates-with-command)。
 
-## 定义 State
+## 安装与准备
 
-Graph State 是所有 Node 之间共享的数据。Node 读取 State，并返回 **Partial Update**；LangGraph 再根据每个字段对应的 Reducer 把 Update 合并进当前 State。
+:::python
+安装 `langgraph`：
+
+<CodeGroup>
+```bash pip
+pip install -U langgraph
+```
+
+```bash uv
+uv add langgraph
+```
+</CodeGroup>
+:::
+
+:::js
+安装 `langgraph`：
+
+```bash
+npm install @langchain/langgraph
+```
+:::
+
+<Tip>
+**配置 LangSmith 以获得更好的调试体验**
+
+注册 [LangSmith](https://smith.langchain.com)，可以更快发现问题并提升 LangGraph 项目的性能。LangSmith 可以利用 Trace 数据对基于 LangGraph 构建的 LLM 应用进行调试、测试和监控。更多信息参见[可观测性文档](/langsmith/observability)。
+</Tip>
+
+## 定义和更新 State
+
+本节介绍如何在 LangGraph 中定义和更新 [State](/oss/langgraph/graph-api#state)，主要包括：
+
+1. 如何使用 State 定义 Graph 的 [Schema](/oss/langgraph/graph-api#schema)
+2. 如何使用 [Reducer](/oss/langgraph/graph-api#reducers) 控制 State Update 的处理方式
+
+### 定义 State
+
+:::python
+LangGraph 中的 [State](/oss/langgraph/graph-api#state) 可以使用 `TypedDict`、Pydantic Model 或 Dataclass 定义。下面使用 `TypedDict`。关于 Pydantic，请参阅[使用 Pydantic Model 作为 Graph State](#use-pydantic-models-for-graph-state)。
+:::
+
+:::js
+LangGraph 中的 [State](/oss/langgraph/graph-api#state) 使用 `StateSchema` Class 定义。它提供统一 API，可以为各字段使用 [Standard Schema](https://standardschema.dev/)（例如 [Zod](https://zod.dev/)），也可以使用 `ReducedValue`、`MessagesValue`、`UntrackedValue` 等特殊 Value Type。
+:::
+
+默认情况下，Graph 的输入与输出使用同一个 Schema，由 State 决定。如果希望分别定义输入与输出 Schema，请参阅[定义输入和输出 Schema](#define-input-and-output-schemas)。
+
+:::python
+下面以 [Messages](/oss/langgraph/graph-api#messagesstate) 为例。对于许多 LLM 应用，这是一种非常通用的 State 表示方式。更多细节参见[在 Graph State 中使用 Message](/oss/langgraph/graph-api#working-with-messages-in-graph-state)。
+:::
+:::js
+下面以 [Messages](/oss/langgraph/graph-api#working-with-messages-in-graph-state) 为例。对于许多 LLM 应用，这是一种非常通用的 State 表示方式。更多细节参见[在 Graph State 中使用 Message](/oss/langgraph/graph-api#working-with-messages-in-graph-state)。
+:::
 
 :::python
 ```python
+from langchain.messages import AnyMessage
 from typing_extensions import TypedDict
 
 class State(TypedDict):
-    topic: str
-    draft: str
-    score: float
+    messages: list[AnyMessage]
+    extra_field: int
 ```
+
+这个 State 同时跟踪一组 [Message](https://python.langchain.com/docs/concepts/messages/) 对象和一个额外的整数 Field。
 :::
 
 :::js
 ```typescript
+import { StateSchema, MessagesValue } from "@langchain/langgraph";
 import * as z from "zod";
-import { StateSchema } from "@langchain/langgraph";
 
 const State = new StateSchema({
-  topic: z.string(),
-  draft: z.string().optional(),
-  score: z.number().optional(),
+  messages: MessagesValue,
+  extraField: z.number(),
 });
 ```
+
+这个 State 同时跟踪一组 [Message](https://js.langchain.com/docs/concepts/messages/) 对象和一个额外的整数 Field。
 :::
 
-Node 不需要返回完整 State：
-
-```python
-def write_draft(state: State):
-    return {"draft": f"Draft about {state['topic']}"}
-```
-
-<a id="define-input-and-output-schemas"></a>
-## 定义不同的输入和输出 Schema
-
-大型应用中，内部 State 往往包含很多字段，但调用者只应该看到少量输入和输出。可以分别定义 Input / Output / Internal Schema。
+### 更新 State
 
 :::python
+先构建一张只包含一个 Node 的简单 Graph。一个 [Node](/oss/langgraph/graph-api#nodes) 本质上就是一个读取 Graph State 并返回更新的 Python Function。函数的第一个参数始终是 State：
+
 ```python
-from typing_extensions import TypedDict
-from langgraph.graph import StateGraph, START, END
+from langchain.messages import AIMessage
 
-class InputState(TypedDict):
-    user_input: str
+def node(state: State):
+    messages = state["messages"]
+    new_message = AIMessage("Hello!")
+    return {"messages": messages + [new_message], "extra_field": 10}
+```
 
-class OutputState(TypedDict):
-    answer: str
+这个 Node 会向 Message List 追加一条消息，并填充 `extra_field`。
+:::
 
-class OverallState(InputState, OutputState):
-    internal_notes: str
+:::js
+先构建一张只包含一个 Node 的简单 Graph。一个 [Node](/oss/langgraph/graph-api#nodes) 本质上就是一个读取 Graph State 并返回更新的 TypeScript Function。函数的第一个参数始终是 State：
 
+```typescript
+import { AIMessage } from "@langchain/core/messages";
+import { GraphNode } from "@langchain/langgraph";
 
-def prepare(state: InputState):
-    return {"internal_notes": f"Analyze: {state['user_input']}"}
+const node: GraphNode<typeof State> = (state) => {
+  const messages = state.messages;
+  const newMessage = new AIMessage("Hello!");
+  return { messages: [newMessage], extraField: 10 };
+};
+```
 
+这个 Node 会向 Message List 追加一条消息（拼接由 Reducer 负责），并填充 `extraField`。
+:::
 
-def respond(state: OverallState):
-    return {"answer": state["internal_notes"]}
+<Warning>
+Node 应该直接**返回 State Update**，而不是原地修改 State。
+</Warning>
 
-builder = StateGraph(
-    OverallState,
-    input_schema=InputState,
-    output_schema=OutputState,
-)
-builder.add_node("prepare", prepare)
-builder.add_node("respond", respond)
-builder.add_edge(START, "prepare")
-builder.add_edge("prepare", "respond")
-builder.add_edge("respond", END)
+:::python
+接下来定义包含这个 Node 的简单 Graph。使用 [`StateGraph`](/oss/langgraph/graph-api#stategraph) 定义作用于该 State 的 Graph，然后用 [`add_node`](/oss/langgraph/graph-api#nodes) 添加 Node。
 
+```python
+from langgraph.graph import StateGraph
+
+builder = StateGraph(State)
+builder.add_node(node)
+builder.set_entry_point("node")
 graph = builder.compile()
 ```
 :::
 
-Input / Output Schema 控制外部接口，但并不意味着内部 Channel 会自动从 Streaming 中脱敏。如果某个字段具有敏感性，需要在 Streaming 层显式限制 `output_keys` 或设计单独的输出通道。
+:::js
+接下来定义包含这个 Node 的简单 Graph。使用 [`StateGraph`](/oss/langgraph/graph-api#stategraph) 定义作用于该 State 的 Graph，然后用 [`addNode`](/oss/langgraph/graph-api#nodes) 添加 Node。
 
-<a id="use-pydantic-models-for-graph-state"></a>
-## 使用 Pydantic Model 作为 Graph State
+```typescript
+import { StateGraph } from "@langchain/langgraph";
 
-Python 中除了 `TypedDict`，也可以使用 Pydantic `BaseModel` 获得 Runtime Validation 和默认值。
-
-```python
-from pydantic import BaseModel, Field
-
-class State(BaseModel):
-    topic: str
-    retries: int = Field(default=0, ge=0)
+const graph = new StateGraph(State)
+  .addNode("node", node)
+  .addEdge("__start__", "node")
+  .compile();
 ```
+:::
 
-Pydantic 会增加额外校验开销。若不需要 Runtime Validation，`TypedDict` 通常更轻量。
-
-## 为 State 字段定义 Reducer
-
-默认情况下，同一个字段的新 Update 会覆盖旧值。若要累加、合并或执行自定义逻辑，应为字段定义 Reducer。
+LangGraph 内置 Graph Visualization 工具。下面查看这张 Graph。关于可视化的更多细节参见[可视化 Graph](#visualize-your-graph)。
 
 :::python
 ```python
-from operator import add
-from typing import Annotated
-from typing_extensions import TypedDict
+from IPython.display import Image, display
 
-class State(TypedDict):
-    messages: Annotated[list[str], add]
+display(Image(graph.get_graph().draw_mermaid_png()))
+```
+
+![Simple graph with single node](/oss/images/graph_api_image_1.png)
+:::
+
+:::js
+```typescript
+import * as fs from "node:fs/promises";
+
+const drawableGraph = await graph.getGraphAsync();
+const image = await drawableGraph.drawMermaidPng();
+const imageBuffer = new Uint8Array(await image.arrayBuffer());
+
+await fs.writeFile("graph.png", imageBuffer);
+```
+:::
+
+这里 Graph 只执行一个 Node。下面进行一次简单调用：
+
+:::python
+```python
+from langchain.messages import HumanMessage
+
+result = graph.invoke({"messages": [HumanMessage("Hi")]})
+result
+```
+
+```
+{'messages': [HumanMessage(content='Hi'), AIMessage(content='Hello!')], 'extra_field': 10}
 ```
 :::
 
 :::js
 ```typescript
-import { ReducedValue, StateSchema } from "@langchain/langgraph";
-import * as z from "zod";
+import { HumanMessage } from "@langchain/core/messages";
 
-const State = new StateSchema({
-  messages: new ReducedValue(
-    z.array(z.string()).default(() => []),
-    {
-      inputSchema: z.array(z.string()),
-      reducer: (left, right) => left.concat(right),
-    }
-  ),
-});
+const result = await graph.invoke({ messages: [new HumanMessage("Hi")], extraField: 0 });
+console.log(result);
+```
+
+```
+{ messages: [HumanMessage { content: 'Hi' }, AIMessage { content: 'Hello!' }], extraField: 10 }
 ```
 :::
 
-Reducer 对并行执行尤其重要：同一个 Super-step 中多个 Node 如果同时写同一字段，而该字段又没有支持多写入的 Reducer，Runtime 可能抛出 `InvalidUpdateError`。
+注意：
 
-<a id="bypass-reducers-with-overwrite"></a>
-## 使用 Overwrite 绕过 Reducer
+* 启动 Invocation 时，我们只更新了一个 State Key。
+* Invocation Result 返回的是完整 State。
 
-有时字段通常使用累加 Reducer，但某一次更新希望**完全替换**旧值。Python 可以使用 `Overwrite`：
+:::python
+为了方便，通常可以使用 Pretty Print 查看 [Message Object](https://python.langchain.com/docs/concepts/messages/) 内容：
 
 ```python
-from langgraph.types import Overwrite
-
-
-def reset_messages(state: State):
-    return {"messages": Overwrite([])}
+for message in result["messages"]:
+    message.pretty_print()
 ```
 
-注意：返回空列表本身并不会清空带追加 Reducer 的字段，因为 Reducer 会把空列表与旧值合并。
+```
+================================ Human Message ================================
 
-## 使用 MessagesState
+Hi
+================================== Ai Message ==================================
 
-聊天智能体最常见的 State 是消息列表。Python 可直接使用 `MessagesState`：
+Hello!
+```
+:::
+
+:::js
+为了方便，通常可以通过 Logging 查看 [Message Object](https://js.langchain.com/docs/concepts/messages/) 内容：
+
+```typescript
+for (const message of result.messages) {
+  console.log(`${message.getType()}: ${message.content}`);
+}
+```
+
+```
+human: Hi
+ai: Hello!
+```
+:::
+
+### 使用 Reducer 处理 State Update
+
+State 中的每个 Key 都可以拥有自己独立的 [Reducer](/oss/langgraph/graph-api#reducers) Function，由它决定 Node 返回的 Update 如何应用。如果没有显式指定 Reducer，默认行为是**覆盖**这个 Key 的旧值。
+
+:::python
+对于 `TypedDict` State Schema，可以通过给对应 Field 添加 Reducer Function Annotation 来定义 Reducer。
+
+前面的例子中，Node 会通过追加 Message 更新 `"messages"` Key。下面给这个 Key 增加 Reducer，使新的 Update 自动追加：
+
+```python
+from typing_extensions import Annotated
+
+def add(left, right):
+    """Can also import `add` from the `operator` built-in."""
+    return left + right
+
+class State(TypedDict):
+    messages: Annotated[list[AnyMessage], add]  # [!code highlight]
+    extra_field: int
+```
+
+现在 Node 可以进一步简化：
+
+```python
+def node(state: State):
+    new_message = AIMessage("Hello!")
+    return {"messages": [new_message], "extra_field": 10}  # [!code highlight]
+```
+:::
+
+:::js
+前面的示例已经使用了带内置 Reducer 的 `MessagesValue`。对于自定义 Field，可以使用 `ReducedValue` 定义 Update 应如何应用。
+
+前面的 Node 会通过追加 Message 更新 `"messages"` Key；`MessagesValue` Reducer 会自动完成这一工作：
+
+```typescript
+import { StateSchema, MessagesValue, ReducedValue } from "@langchain/langgraph";
+import * as z from "zod";
+
+// MessagesValue already has a built-in reducer
+const State = new StateSchema({
+  messages: MessagesValue,  // [!code highlight]
+  extraField: z.number(),
+});
+```
+
+Node 只需要返回新 Message，拼接由 Reducer 完成：
+
+```typescript
+import { GraphNode } from "@langchain/langgraph";
+
+const node: GraphNode<typeof State> = (state) => {
+  const newMessage = new AIMessage("Hello!");
+  return { messages: [newMessage], extraField: 10 };  // [!code highlight]
+};
+```
+:::
+
+:::python
+```python
+from langgraph.graph import START
+
+graph = StateGraph(State).add_node(node).add_edge(START, "node").compile()
+
+result = graph.invoke({"messages": [HumanMessage("Hi")]})
+
+for message in result["messages"]:
+    message.pretty_print()
+```
+
+```
+================================ Human Message ================================
+
+Hi
+================================== Ai Message ==================================
+
+Hello!
+```
+:::
+
+:::js
+```typescript
+import { START } from "@langchain/langgraph";
+
+const graph = new StateGraph(State)
+  .addNode("node", node)
+  .addEdge(START, "node")
+  .compile();
+
+const result = await graph.invoke({ messages: [new HumanMessage("Hi")] });
+
+for (const message of result.messages) {
+  console.log(`${message.getType()}: ${message.content}`);
+}
+```
+
+```
+human: Hi
+ai: Hello!
+```
+:::
+
+:::python
+#### MessagesState
+
+实际应用中，更新 Message List 还需要考虑：
+
+* 可能需要更新 State 中已经存在的某条 Message。
+* 可能希望接受 [Message Format](/oss/langgraph/graph-api#using-messages-in-your-graph) 的简写形式，例如 [OpenAI Format](https://python.langchain.com/docs/concepts/messages/#openai-format)。
+
+LangGraph 内置 @[`add_messages`] Reducer 来处理这些情况：
+
+```python
+from langgraph.graph.message import add_messages
+
+class State(TypedDict):
+    messages: Annotated[list[AnyMessage], add_messages]  # [!code highlight]
+    extra_field: int
+
+def node(state: State):
+    new_message = AIMessage("Hello!")
+    return {"messages": [new_message], "extra_field": 10}
+
+graph = StateGraph(State).add_node(node).set_entry_point("node").compile()
+```
+
+```python
+input_message = {"role": "user", "content": "Hi"}  # [!code highlight]
+
+result = graph.invoke({"messages": [input_message]})
+
+for message in result["messages"]:
+    message.pretty_print()
+```
+
+```
+================================ Human Message ================================
+
+Hi
+================================== Ai Message ==================================
+
+Hello!
+```
+
+对于使用 [Chat Model](https://python.langchain.com/docs/concepts/chat_models/) 的应用，这是非常通用的 State 表示。LangGraph 还内置了 `MessagesState`，因此可以直接扩展：
 
 ```python
 from langgraph.graph import MessagesState
 
 class State(MessagesState):
-    user_id: str
+    extra_field: int
+```
+:::
+
+:::js
+#### MessagesValue
+
+实际应用中，更新 Message List 还需要考虑：
+
+* 可能需要更新 State 中已经存在的某条 Message。
+* 可能希望接受 [Message Format](/oss/langgraph/graph-api#using-messages-in-your-graph) 的简写形式，例如 [OpenAI Format](https://python.langchain.com/docs/concepts/messages/#openai-format)。
+
+LangGraph 内置 `MessagesValue` 来处理这些情况：
+
+```typescript
+import { StateSchema, StateGraph, MessagesValue, GraphNode, START } from "@langchain/langgraph";
+import * as z from "zod";
+
+const State = new StateSchema({  // [!code highlight]
+  messages: MessagesValue,
+  extraField: z.number(),
+});
+
+const node: GraphNode<typeof State> = (state) => {
+  const newMessage = new AIMessage("Hello!");
+  return { messages: [newMessage], extraField: 10 };
+};
+
+const graph = new StateGraph(State)
+  .addNode("node", node)
+  .addEdge(START, "node")
+  .compile();
 ```
 
-`messages` 字段使用 Message-aware Reducer `add_messages`，支持按 Message ID 更新已有消息，而不只是简单追加。
+```typescript
+const inputMessage = { role: "user", content: "Hi" };  // [!code highlight]
 
-JavaScript 可以使用 `MessagesValue`：
+const result = await graph.invoke({ messages: [inputMessage] });
+
+for (const message of result.messages) {
+  console.log(`${message.getType()}: ${message.content}`);
+}
+```
+
+```
+human: Hi
+ai: Hello!
+```
+
+对于使用 [Chat Model](https://js.langchain.com/docs/concepts/chat_models/) 的应用，这是非常通用的 State 表示。LangGraph 内置 `MessagesValue`，因此可以直接使用：
 
 ```typescript
 import { StateSchema, MessagesValue } from "@langchain/langgraph";
+import * as z from "zod";
 
 const State = new StateSchema({
   messages: MessagesValue,
+  extraField: z.number(),
 });
 ```
+:::
 
-## 添加 Node
+:::python
+### 使用 `Overwrite` 绕过 Reducer
 
-Node 是接收 State 并返回 State Update 的函数。
+有时你希望绕过 Reducer，直接覆盖某个 State Value。LangGraph 为此提供 [`Overwrite`](https://reference.langchain.com/python/langgraph/types/) Type。当 Node 返回被 `Overwrite` 包裹的值时，对应 Reducer 不会执行，该 Channel 会直接被设置为这个值。
+
+当你希望重置或替换累计 State，而不是继续合并旧值时，这很有用。
+
+```python
+from langgraph.graph import StateGraph, START, END
+from langgraph.types import Overwrite
+from typing_extensions import Annotated, TypedDict
+import operator
+
+class State(TypedDict):
+    messages: Annotated[list, operator.add]
+
+def add_message(state: State):
+    return {"messages": ["first message"]}
+
+def replace_messages(state: State):
+    # Bypass the reducer and replace the entire messages list
+    return {"messages": Overwrite(["replacement message"])}
+
+builder = StateGraph(State)
+builder.add_node("add_message", add_message)
+builder.add_node("replace_messages", replace_messages)
+builder.add_edge(START, "add_message")
+builder.add_edge("add_message", "replace_messages")
+builder.add_edge("replace_messages", END)
+
+graph = builder.compile()
+
+result = graph.invoke({"messages": ["initial"]})
+print(result["messages"])
+```
+
+```
+['replacement message']
+```
+
+也可以使用特殊 Key `"__overwrite__"` 的 JSON Format：
+
+```python
+def replace_messages(state: State):
+    return {"messages": {"__overwrite__": ["replacement message"]}}
+```
+
+<Warning>
+当多个 Node 并行执行时，在同一个 Superstep 内，同一个 State Key 最多只能有一个 Node 使用 `Overwrite`。如果多个 Node 同时尝试覆盖同一个 Key，会抛出 `InvalidUpdateError`。
+</Warning>
+:::
+
+### 定义输入和输出 Schema
+
+默认情况下，`StateGraph` 使用单一 Schema，所有 Node 都通过这个 Schema 通信。但也可以为 Graph 分别定义 Input Schema 与 Output Schema。
+
+当指定不同 Schema 后，Node 之间仍会使用一个内部 Schema 通信。Input Schema 用于确保输入符合预期结构，而 Output Schema 会过滤内部数据，只返回 Output Schema 声明的信息。
+
+下面展示如何分别定义输入与输出 Schema。
 
 :::python
 ```python
-from langgraph.graph import StateGraph
+from langgraph.graph import StateGraph, START, END
+from typing_extensions import TypedDict
+
+# Define the schema for the input
+class InputState(TypedDict):
+    question: str
+
+# Define the schema for the output
+class OutputState(TypedDict):
+    answer: str
+
+# Define the overall schema, combining both input and output
+class OverallState(InputState, OutputState):
+    pass
+
+# Define the node that processes the input and generates an answer
+def answer_node(state: InputState):
+    # Example answer and an extra key
+    return {"answer": "bye", "question": state["question"]}
+
+# Build the graph with input and output schemas specified
+builder = StateGraph(OverallState, input_schema=InputState, output_schema=OutputState)
+builder.add_node(answer_node)  # Add the answer node
+builder.add_edge(START, "answer_node")  # Define the starting edge
+builder.add_edge("answer_node", END)  # Define the ending edge
+graph = builder.compile()  # Compile the graph
+
+# Invoke the graph with an input and print the result
+print(graph.invoke({"question": "hi"}))
+```
+
+```
+{'answer': 'bye'}
+```
+:::
+
+:::js
+```typescript
+import { StateGraph, StateSchema, GraphNode, START, END } from "@langchain/langgraph";
+import * as z from "zod";
+
+// Define the schema for the input
+const InputState = new StateSchema({
+  question: z.string(),
+});
+
+// Define the schema for the output
+const OutputState = new StateSchema({
+  answer: z.string(),
+});
+
+// Define the overall schema, combining both input and output
+const OverallState = new StateSchema({
+  question: z.string(),
+  answer: z.string(),
+});
+
+// Define the node that processes the input
+const answerNode: GraphNode<typeof OverallState> = (state) => {
+  // Example answer and an extra key
+  return { answer: "bye", question: state.question };
+};
+
+// Build the graph with input and output schemas specified
+const graph = new StateGraph({
+  input: InputState,
+  output: OutputState,
+  state: OverallState,
+})
+  .addNode("answerNode", answerNode)
+  .addEdge(START, "answerNode")
+  .addEdge("answerNode", END)
+  .compile();
+
+// Invoke the graph with an input and print the result
+console.log(await graph.invoke({ question: "hi" }));
+```
+
+```
+{ answer: 'bye' }
+```
+:::
+
+注意，`invoke` 的输出只包含 Output Schema 中声明的字段。
+
+### 在 Node 之间传递私有 State
+
+有时 Node 之间需要交换某些中间信息，但这些数据并不属于 Graph 的主 Schema，也不需要成为 Graph 的整体输入或输出。此时可以使用 Private State，只在特定 Node 之间共享。
+
+下面构建一个由 `node_1`、`node_2`、`node_3` 组成的顺序 Graph，其中 `node_1` 与 `node_2` 之间会传递 Private Data，而 `node_3` 只能访问公共 Overall State。
+
+:::python
+```python
+from langgraph.graph import StateGraph, START, END
+from typing_extensions import TypedDict
+
+# The overall state of the graph (this is the public state shared across nodes)
+class OverallState(TypedDict):
+    a: str
+
+# Output from node_1 contains private data that is not part of the overall state
+class Node1Output(TypedDict):
+    private_data: str
+
+# The private data is only shared between node_1 and node_2
+def node_1(state: OverallState) -> Node1Output:
+    output = {"private_data": "set by node_1"}
+    print(f"Entered node `node_1`:\n\tInput: {state}.\n\tReturned: {output}")
+    return output
+
+# Node 2 input only requests the private data available after node_1
+class Node2Input(TypedDict):
+    private_data: str
+
+def node_2(state: Node2Input) -> OverallState:
+    output = {"a": "set by node_2"}
+    print(f"Entered node `node_2`:\n\tInput: {state}.\n\tReturned: {output}")
+    return output
+
+# Node 3 only has access to the overall state (no access to private data from node_1)
+def node_3(state: OverallState) -> OverallState:
+    output = {"a": "set by node_3"}
+    print(f"Entered node `node_3`:\n\tInput: {state}.\n\tReturned: {output}")
+    return output
+
+# Connect nodes in a sequence
+# node_2 accepts private data from node_1, whereas
+# node_3 does not see the private data.
+builder = StateGraph(OverallState).add_sequence([node_1, node_2, node_3])
+builder.add_edge(START, "node_1")
+graph = builder.compile()
+
+# Invoke the graph with the initial state
+response = graph.invoke(
+    {
+        "a": "set at start",
+    }
+)
+
+print()
+print(f"Output of graph invocation: {response}")
+```
+
+```
+Entered node `node_1`:
+    Input: {'a': 'set at start'}.
+    Returned: {'private_data': 'set by node_1'}
+Entered node `node_2`:
+    Input: {'private_data': 'set by node_1'}.
+    Returned: {'a': 'set by node_2'}
+Entered node `node_3`:
+    Input: {'a': 'set by node_2'}.
+    Returned: {'a': 'set by node_3'}
+
+Output of graph invocation: {'a': 'set by node_3'}
+```
+:::
+
+:::js
+```typescript
+import { StateGraph, StateSchema, GraphNode, START, END } from "@langchain/langgraph";
+import * as z from "zod";
+
+// The overall state of the graph (this is the public state shared across nodes)
+const OverallState = new StateSchema({
+  a: z.string(),
+});
+
+// Output from node1 contains private data that is not part of the overall state
+const Node1Output = new StateSchema({
+  privateData: z.string(),
+});
+
+// Node 2 input only requests the private data available after node1
+const Node2Input = new StateSchema({
+  privateData: z.string(),
+});
+
+// The private data is only shared between node1 and node2
+const node1: GraphNode<typeof OverallState> = (state) => {
+  const output = { privateData: "set by node1" };
+  console.log(`Entered node 'node1':\n\tInput: ${JSON.stringify(state)}.\n\tReturned: ${JSON.stringify(output)}`);
+  return output;
+};
+
+const node2: GraphNode<typeof Node2Input> = (state) => {
+  const output = { a: "set by node2" };
+  console.log(`Entered node 'node2':\n\tInput: ${JSON.stringify(state)}.\n\tReturned: ${JSON.stringify(output)}`);
+  return output;
+};
+
+// Node 3 only has access to the overall state (no access to private data from node1)
+const node3: GraphNode<typeof OverallState> = (state) => {
+  const output = { a: "set by node3" };
+  console.log(`Entered node 'node3':\n\tInput: ${JSON.stringify(state)}.\n\tReturned: ${JSON.stringify(output)}`);
+  return output;
+};
+
+// Connect nodes in a sequence
+// node2 accepts private data from node1, whereas
+// node3 does not see the private data.
+const graph = new StateGraph(OverallState)
+  .addNode("node1", node1)
+  .addNode("node2", node2, { input: Node2Input })
+  .addNode("node3", node3)
+  .addEdge(START, "node1")
+  .addEdge("node1", "node2")
+  .addEdge("node2", "node3")
+  .addEdge("node3", END)
+  .compile();
+
+// Invoke the graph with the initial state
+const response = await graph.invoke({ a: "set at start" });
+
+console.log(`\nOutput of graph invocation: ${JSON.stringify(response)}`);
+```
+
+```
+Entered node 'node1':
+	Input: {"a":"set at start"}.
+	Returned: {"privateData":"set by node1"}
+Entered node 'node2':
+	Input: {"privateData":"set by node1"}.
+	Returned: {"a":"set by node2"}
+Entered node 'node3':
+	Input: {"a":"set by node2"}.
+	Returned: {"a":"set by node3"}
+
+Output of graph invocation: {"a":"set by node3"}
+```
+:::
+
+:::python
+### 使用 Pydantic Model 作为 Graph State
+
+@[StateGraph] 初始化时接受 @[`state_schema`] 参数，用于指定 Graph Node 可以访问和更新的 State “形状”。
+
+示例通常使用 Python 原生 `TypedDict` 或 [`dataclass`](https://docs.python.org/3/library/dataclasses.html) 作为 `state_schema`，但 @[`state_schema`] 可以是任意 Python [Type](https://docs.python.org/3/library/stdtypes.html#type-objects)。
+
+这里展示如何使用 [Pydantic BaseModel](https://docs.pydantic.dev/latest/api/base_model/) 作为 @[`state_schema`]，从而对**输入**增加 Runtime Validation。
+
+<Note>
+**已知限制**
+* 当前 Graph Output **不会**自动变成 Pydantic Model Instance。
+* Runtime Validation 只会对进入 Graph 第一个 Node 的输入执行，不会对后续 Node 或输出逐步验证。
+* Pydantic Validation Error Trace 不会显示错误具体来自哪个 Node。
+* Pydantic 的递归验证可能较慢。对于性能敏感应用，可以考虑使用 `dataclass`。
+</Note>
+
+```python
+from langgraph.graph import StateGraph, START, END
+from typing_extensions import TypedDict
+from pydantic import BaseModel
+
+# The overall state of the graph (this is the public state shared across nodes)
+class OverallState(BaseModel):
+    a: str
+
+def node(state: OverallState):
+    return {"a": "goodbye"}
+
+# Build the state graph
+builder = StateGraph(OverallState)
+builder.add_node(node)  # node_1 is the first node
+builder.add_edge(START, "node")  # Start the graph with node_1
+builder.add_edge("node", END)  # End the graph after node_1
+graph = builder.compile()
+
+# Test the graph with a valid input
+graph.invoke({"a": "hello"})
+```
+
+使用**无效**输入调用 Graph：
+
+```python
+try:
+    graph.invoke({"a": 123})  # Should be a string
+except Exception as e:
+    print("An exception was raised because `a` is an integer rather than a string.")
+    print(e)
+```
+
+```
+An exception was raised because `a` is an integer rather than a string.
+1 validation error for OverallState
+a
+  Input should be a valid string [type=string_type, input_value=123, input_type=int]
+    For further information visit https://errors.pydantic.dev/2.9/v/string_type
+```
+
+下面给出 Pydantic State 的其他特性：
+
+<Accordion title="序列化行为">
+  使用 Pydantic Model 作为 State Schema 时，需要理解它的序列化行为，尤其是在以下场景中：
+
+  * 把 Pydantic Object 作为输入
+  * 接收 Graph Output
+  * 使用嵌套 Pydantic Model
+
+  ```python
+  from langgraph.graph import StateGraph, START, END
+  from pydantic import BaseModel
+
+  class NestedModel(BaseModel):
+      value: str
+
+  class ComplexState(BaseModel):
+      text: str
+      count: int
+      nested: NestedModel
+
+  def process_node(state: ComplexState):
+      # Node receives a validated Pydantic object
+      print(f"Input state type: {type(state)}")
+      print(f"Nested type: {type(state.nested)}")
+      # Return a dictionary update
+      return {"text": state.text + " processed", "count": state.count + 1}
+
+  # Build the graph
+  builder = StateGraph(ComplexState)
+  builder.add_node("process", process_node)
+  builder.add_edge(START, "process")
+  builder.add_edge("process", END)
+  graph = builder.compile()
+
+  # Create a Pydantic instance for input
+  input_state = ComplexState(text="hello", count=0, nested=NestedModel(value="test"))
+  print(f"Input object type: {type(input_state)}")
+
+  # Invoke graph with a Pydantic instance
+  result = graph.invoke(input_state)
+  print(f"Output type: {type(result)}")
+  print(f"Output content: {result}")
+
+  # Convert back to Pydantic model if needed
+  output_model = ComplexState(**result)
+  print(f"Converted back to Pydantic: {type(output_model)}")
+  ```
+</Accordion>
+
+<Accordion title="Runtime 类型转换">
+  Pydantic 会对某些数据类型进行 Runtime Type Coercion。这通常很方便，但如果不了解这种行为，也可能带来意外结果。
+
+  ```python
+  from langgraph.graph import StateGraph, START, END
+  from pydantic import BaseModel
+
+  class CoercionExample(BaseModel):
+      # Pydantic will coerce string numbers to integers
+      number: int
+      # Pydantic will parse string booleans to bool
+      flag: bool
+
+  def inspect_node(state: CoercionExample):
+      print(f"number: {state.number} (type: {type(state.number)})")
+      print(f"flag: {state.flag} (type: {type(state.flag)})")
+      return {}
+
+  builder = StateGraph(CoercionExample)
+  builder.add_node("inspect", inspect_node)
+  builder.add_edge(START, "inspect")
+  builder.add_edge("inspect", END)
+  graph = builder.compile()
+
+  # Demonstrate coercion with string inputs that will be converted
+  result = graph.invoke({"number": "42", "flag": "true"})
+
+  # This would fail with a validation error
+  try:
+      graph.invoke({"number": "not-a-number", "flag": "true"})
+  except Exception as e:
+      print(f"\nExpected validation error: {e}")
+  ```
+</Accordion>
+
+<Accordion title="与 Message Model 一起使用">
+  当 State Schema 中包含 LangChain Message Type 时，需要注意序列化。通过网络序列化和反序列化 Message Object 时，应使用 `AnyMessage`（而不是 `BaseMessage`）。
+
+  ```python
+  from langgraph.graph import StateGraph, START, END
+  from pydantic import BaseModel
+  from langchain.messages import HumanMessage, AIMessage, AnyMessage
+  from typing import List
+
+  class ChatState(BaseModel):
+      messages: List[AnyMessage]
+      context: str
+
+  def add_message(state: ChatState):
+      return {"messages": state.messages + [AIMessage(content="Hello there!")]}
+
+  builder = StateGraph(ChatState)
+  builder.add_node("add_message", add_message)
+  builder.add_edge(START, "add_message")
+  builder.add_edge("add_message", END)
+  graph = builder.compile()
+
+  # Create input with a message
+  initial_state = ChatState(
+      messages=[HumanMessage(content="Hi")], context="Customer support chat"
+  )
+
+  result = graph.invoke(initial_state)
+  print(f"Output: {result}")
+
+  # Convert back to Pydantic model to see message types
+  output_model = ChatState(**result)
+  for i, msg in enumerate(output_model.messages):
+      print(f"Message {i}: {type(msg).__name__} - {msg.content}")
+  ```
+</Accordion>
+:::
+
+:::js
+### 其他 State 定义方式
+
+虽然推荐使用 `StateSchema` 定义 State，LangGraph 也支持其他几种方式。
+
+#### Channels API
+
+Channels API 提供更底层的 State Management 控制。LangGraph 内置多种 Channel Type：
+
+| Channel Type | 行为 | 适用场景 |
+|--------------|----------|----------|
+| `LastValue` | 保存最近一次值 | 每次更新直接覆盖的简单 Field |
+| `BinaryOperatorAggregate` | 使用 Reducer Function 合并值 | 累加 Counter、List 等 |
+| `Topic` | 把所有值收集成 Sequence | Event Stream、Audit Log |
+| `EphemeralValue` | 每个 Superstep 之间重置 | 临时计算 State |
+
+**使用 Object Shorthand：**
+
+传入带 `reducer` 和 `default` 的对象会创建 `BinaryOperatorAggregate` Channel；传入 `null` 会创建 `LastValue` Channel：
+
+```typescript
+import { BaseMessage } from "@langchain/core/messages";
+import { StateGraph } from "@langchain/langgraph";
+
+interface WorkflowState {
+  messages: BaseMessage[];
+  question: string;
+  answer: string;
+}
+
+const workflow = new StateGraph<WorkflowState>({
+  channels: {
+    // BinaryOperatorAggregate: combines values with a reducer
+    messages: {
+      reducer: (current, update) => current.concat(update),
+      default: () => [],
+    },
+    // LastValue: stores the most recent value (null = no reducer)
+    question: null,
+    answer: null,
+  },
+});
+```
+
+**直接使用 Channel Class：**
+
+如果需要更细控制，可以直接实例化 Channel Class：
+
+```typescript
+import { BaseMessage } from "@langchain/core/messages";
+import { StateGraph, LastValue, BinaryOperatorAggregate, Topic } from "@langchain/langgraph";
+
+interface WorkflowState {
+  messages: BaseMessage[];
+  question: string;
+  events: string[];
+}
+
+const workflow = new StateGraph<WorkflowState>({
+  channels: {
+    messages: new BinaryOperatorAggregate<BaseMessage[]>(
+      (current, update) => current.concat(update),
+      () => []
+    ),
+    question: new LastValue<string>(),
+    // Topic collects all values pushed during execution
+    events: new Topic<string>(),
+  },
+});
+```
+
+#### Annotation.Root
+
+`Annotation.Root` 提供声明式的 State + Reducer 定义方式。它与 `StateSchema` 类似，但语法不同：
+
+```typescript
+import { BaseMessage } from "@langchain/core/messages";
+import { Annotation, StateGraph, messagesStateReducer } from "@langchain/langgraph";
+
+const State = Annotation.Root({
+  messages: Annotation<BaseMessage[]>({
+    reducer: messagesStateReducer,
+    default: () => [],
+  }),
+  question: Annotation<string>(),
+  count: Annotation<number>({
+    reducer: (current, update) => current + update,
+    default: () => 0,
+  }),
+});
+
+const graph = new StateGraph(State);
+```
+
+#### 使用 Zod v3 Object
+
+使用 Zod v3 时，可以通过普通 `z.object()` Schema 定义 State。LangGraph 为 Zod v3 扩展 `.langgraph` Plugin，提供 `.reducer()` 与 `.metadata()`：
+
+```typescript
+import { z } from "zod/v3";
+import { BaseMessage } from "@langchain/core/messages";
+import { StateGraph, messagesStateReducer } from "@langchain/langgraph";
+
+const State = z.object({
+  messages: z
+    .array(z.custom<BaseMessage>())
+    .default([])
+    .langgraph.reducer(messagesStateReducer),
+  question: z.string().optional(),
+  answer: z.string().optional(),
+  count: z
+    .number()
+    .default(0)
+    .langgraph.reducer((current, update) => current + update),
+});
+
+const graph = new StateGraph(State);
+```
+
+#### 使用 Zod v4 Object
+
+Zod v4 使用基于 Registry 的方式。通过 LangGraph Registry 为 Schema Field 附加 Metadata：
+
+```typescript
+import * as z from "zod";
+import { BaseMessage } from "@langchain/core/messages";
+import { StateGraph, MessagesZodMeta, messagesStateReducer } from "@langchain/langgraph";
+import { registry } from "@langchain/langgraph/zod";
+
+const State = z.object({
+  messages: z
+    .array(z.custom<BaseMessage>())
+    .default([])
+    .register(registry, MessagesZodMeta),
+  question: z.string().optional(),
+  answer: z.string().optional(),
+  count: z
+    .number()
+    .default(0)
+    .register(registry, { reducer: (current: number, update: number) => current + update }),
+});
+
+const graph = new StateGraph(State);
+```
+
+#### 对比
+
+| 方式 | Reducer | Type Safety | Zod Version | 推荐程度 |
+|----------|----------|-------------|-------------|-------------|
+| `StateSchema` | ✅ 内置 | ✅ 完整 | v3 或 v4 | ✅ 推荐 |
+| Channels API | ✅ 手动 | ⚠️ 部分 | N/A | 高级场景 |
+| `Annotation.Root` | ✅ 内置 | ✅ 完整 | N/A | Legacy |
+| Zod v3 + `.langgraph` | ✅ Plugin | ✅ 完整 | 仅 v3 | Legacy |
+| Zod v4 + Registry | ✅ Registry | ✅ 完整 | 仅 v4 | Legacy |
+:::
+
+## 添加 Runtime Configuration
+
+有时希望在调用 Graph 时动态配置行为，例如在 Runtime 指定使用哪个 LLM 或 System Prompt，同时又不希望把这些配置参数污染到 Graph State 中。
+
+添加 Runtime Configuration 需要：
+
+1. 为 Configuration 定义 Schema
+2. 在 Node 或 Conditional Edge 的函数签名中接收 Runtime
+3. 调用 Graph 时传入 Configuration
+
+下面是一个简单示例：
+
+:::python
+```python
+from langgraph.graph import END, StateGraph, START
+from langgraph.runtime import Runtime
+from typing_extensions import TypedDict
+
+# 1. Specify config schema
+class ContextSchema(TypedDict):
+    my_runtime_value: str
+
+# 2. Define a graph that accesses the config in a node
+class State(TypedDict):
+    my_state_value: str
+
+def node(state: State, runtime: Runtime[ContextSchema]):  # [!code highlight]
+    if runtime.context["my_runtime_value"] == "a":  # [!code highlight]
+        return {"my_state_value": 1}
+    elif runtime.context["my_runtime_value"] == "b":  # [!code highlight]
+        return {"my_state_value": 2}
+    else:
+        raise ValueError("Unknown values.")
+
+builder = StateGraph(State, context_schema=ContextSchema)  # [!code highlight]
+builder.add_node(node)
+builder.add_edge(START, "node")
+builder.add_edge("node", END)
+
+graph = builder.compile()
+
+# 3. Pass in configuration at runtime:
+print(graph.invoke({}, context={"my_runtime_value": "a"}))  # [!code highlight]
+print(graph.invoke({}, context={"my_runtime_value": "b"}))  # [!code highlight]
+```
+
+```
+{'my_state_value': 1}
+{'my_state_value': 2}
+```
+:::
+
+:::js
+```typescript
+import { StateGraph, StateSchema, GraphNode, END, START } from "@langchain/langgraph";
+import * as z from "zod";
+
+const ContextSchema = z.object({
+  myRuntimeValue: z.string(),
+});
+
+const State = new StateSchema({
+  myStateValue: z.number(),
+});
+
+const node: GraphNode<typeof State> = (state, runtime) => {
+  if (runtime?.context?.myRuntimeValue === "a") {
+    return { myStateValue: 1 };
+  } else if (runtime?.context?.myRuntimeValue === "b") {
+    return { myStateValue: 2 };
+  } else {
+    throw new Error("Unknown values.");
+  }
+};
+
+const graph = new StateGraph(State, ContextSchema)
+  .addNode("node", node)
+  .addEdge(START, "node")
+  .addEdge("node", END)
+  .compile();
+
+console.log(await graph.invoke({}, { context: { myRuntimeValue: "a" } }));
+console.log(await graph.invoke({}, { context: { myRuntimeValue: "b" } }));
+```
+
+```
+{ myStateValue: 1 }
+{ myStateValue: 2 }
+```
+:::
+
+<Accordion title="扩展示例：Runtime 指定 LLM">
+  :::python
+  下面展示一个实际例子，在 Runtime 决定使用哪个 LLM。示例同时使用 OpenAI 和 Anthropic Model。
+
+  ```python
+  from dataclasses import dataclass
+
+  from langchain.chat_models import init_chat_model
+  from langgraph.graph import MessagesState, END, StateGraph, START
+  from langgraph.runtime import Runtime
+  from typing_extensions import TypedDict
+
+  @dataclass
+  class ContextSchema:
+      model_provider: str = "anthropic"
+
+  MODELS = {
+      "anthropic": init_chat_model("claude-haiku-4-5-20251001"),
+      "openai": init_chat_model("gpt-5.4-mini"),
+  }
+
+  def call_model(state: MessagesState, runtime: Runtime[ContextSchema]):
+      model = MODELS[runtime.context.model_provider]
+      response = model.invoke(state["messages"])
+      return {"messages": [response]}
+
+  builder = StateGraph(MessagesState, context_schema=ContextSchema)
+  builder.add_node("model", call_model)
+  builder.add_edge(START, "model")
+  builder.add_edge("model", END)
+
+  graph = builder.compile()
+
+  input_message = {"role": "user", "content": "hi"}
+  response_1 = graph.invoke({"messages": [input_message]}, context=ContextSchema())["messages"][-1]
+  response_2 = graph.invoke({"messages": [input_message]}, context={"model_provider": "openai"})["messages"][-1]
+
+  print(response_1.response_metadata["model_name"])
+  print(response_2.response_metadata["model_name"])
+  ```
+
+  ```
+  claude-haiku-4-5-20251001
+  gpt-5.4-mini
+  ```
+  :::
+
+  :::js
+  下面展示一个实际例子，在 Runtime 决定使用哪个 LLM。示例同时使用 OpenAI 和 Anthropic Model。
+
+  ```typescript
+  import { ChatOpenAI } from "@langchain/openai";
+  import { ChatAnthropic } from "@langchain/anthropic";
+  import { StateGraph, StateSchema, MessagesValue, GraphNode, START, END } from "@langchain/langgraph";
+  import * as z from "zod";
+
+  const ConfigSchema = z.object({
+    modelProvider: z.string().default("anthropic"),
+  });
+
+  const State = new StateSchema({
+    messages: MessagesValue,
+  });
+
+  const MODELS = {
+    anthropic: new ChatAnthropic({ model: "claude-haiku-4-5-20251001" }),
+    openai: new ChatOpenAI({ model: "gpt-5.4-mini" }),
+  };
+
+  const callModel: GraphNode<typeof State> = async (state, config) => {
+    const modelProvider = config?.configurable?.modelProvider || "anthropic";
+    const model = MODELS[modelProvider as keyof typeof MODELS];
+    const response = await model.invoke(state.messages);
+    return { messages: [response] };
+  };
+
+  const graph = new StateGraph(State, ConfigSchema)
+    .addNode("model", callModel)
+    .addEdge(START, "model")
+    .addEdge("model", END)
+    .compile();
+
+  const inputMessage = { role: "user", content: "hi" };
+  const response1 = await graph.invoke({ messages: [inputMessage] });
+  const response2 = await graph.invoke(
+    { messages: [inputMessage] },
+    { configurable: { modelProvider: "openai" } },
+  );
+
+  console.log(response1.messages.at(-1)?.response_metadata?.model);
+  console.log(response2.messages.at(-1)?.response_metadata?.model);
+  ```
+
+  ```
+  claude-haiku-4-5-20251001
+  gpt-5.4-mini
+  ```
+  :::
+</Accordion>
+
+<Accordion title="扩展示例：Runtime 指定 Model 与 System Message">
+  :::python
+  下面同时配置两个 Runtime 参数：LLM 与 System Message。
+
+  ```python
+  from dataclasses import dataclass
+  from langchain.chat_models import init_chat_model
+  from langchain.messages import SystemMessage
+  from langgraph.graph import END, MessagesState, StateGraph, START
+  from langgraph.runtime import Runtime
+  from typing_extensions import TypedDict
+
+  @dataclass
+  class ContextSchema:
+      model_provider: str = "anthropic"
+      system_message: str | None = None
+
+  MODELS = {
+      "anthropic": init_chat_model("claude-haiku-4-5-20251001"),
+      "openai": init_chat_model("gpt-5.4-mini"),
+  }
+
+  def call_model(state: MessagesState, runtime: Runtime[ContextSchema]):
+      model = MODELS[runtime.context.model_provider]
+      messages = state["messages"]
+      if (system_message := runtime.context.system_message):
+          messages = [SystemMessage(system_message)] + messages
+      response = model.invoke(messages)
+      return {"messages": [response]}
+
+  builder = StateGraph(MessagesState, context_schema=ContextSchema)
+  builder.add_node("model", call_model)
+  builder.add_edge(START, "model")
+  builder.add_edge("model", END)
+
+  graph = builder.compile()
+
+  input_message = {"role": "user", "content": "hi"}
+  response = graph.invoke({"messages": [input_message]}, context={"model_provider": "openai", "system_message": "Respond in Italian."})
+  for message in response["messages"]:
+      message.pretty_print()
+  ```
+
+  ```
+  ================================ Human Message ================================
+
+  hi
+  ================================== Ai Message ==================================
+
+  Ciao! Come posso aiutarti oggi?
+  ```
+  :::
+
+  :::js
+  下面同时配置两个 Runtime 参数：LLM 与 System Message。
+
+  ```typescript
+  import { ChatOpenAI } from "@langchain/openai";
+  import { ChatAnthropic } from "@langchain/anthropic";
+  import { SystemMessage } from "@langchain/core/messages";
+  import { StateGraph, StateSchema, MessagesValue, GraphNode, START, END } from "@langchain/langgraph";
+  import * as z from "zod";
+
+  const ConfigSchema = z.object({
+    modelProvider: z.string().default("anthropic"),
+    systemMessage: z.string().optional(),
+  });
+
+  const State = new StateSchema({
+    messages: MessagesValue,
+  });
+
+  const MODELS = {
+    anthropic: new ChatAnthropic({ model: "claude-haiku-4-5-20251001" }),
+    openai: new ChatOpenAI({ model: "gpt-5.4-mini" }),
+  };
+
+  const callModel: GraphNode<typeof State> = async (state, config) => {
+    const modelProvider = config?.configurable?.modelProvider || "anthropic";
+    const systemMessage = config?.configurable?.systemMessage;
+
+    const model = MODELS[modelProvider as keyof typeof MODELS];
+    let messages = state.messages;
+
+    if (systemMessage) {
+      messages = [new SystemMessage(systemMessage), ...messages];
+    }
+
+    const response = await model.invoke(messages);
+    return { messages: [response] };
+  };
+
+  const graph = new StateGraph(State, ConfigSchema)
+    .addNode("model", callModel)
+    .addEdge(START, "model")
+    .addEdge("model", END)
+    .compile();
+
+  const inputMessage = { role: "user", content: "hi" };
+  const response = await graph.invoke(
+    { messages: [inputMessage] },
+    {
+      configurable: {
+        modelProvider: "openai",
+        systemMessage: "Respond in Italian."
+      }
+    }
+  );
+
+  for (const message of response.messages) {
+    console.log(`${message.getType()}: ${message.content}`);
+  }
+  ```
+
+  ```
+  human: hi
+  ai: Ciao! Come posso aiutarti oggi?
+  ```
+  :::
+</Accordion>
+
+## 添加 Retry Policy
+
+调用 API、数据库或 LLM 时经常需要自定义 Retry Policy。LangGraph 支持为每个 Node 单独配置重试策略。
+
+:::python
+把 `retry_policy` 参数传给 @[`add_node`] 即可配置。`retry_policy` 接受 `RetryPolicy` Named Tuple。下面使用默认参数创建并绑定到 Node：
+
+```python
+from langgraph.types import RetryPolicy
+
+builder.add_node(
+    "node_name",
+    node_function,
+    retry_policy=RetryPolicy(),
+)
+```
+
+默认情况下，`retry_on` 使用 `default_retry_on`，会重试大多数 Exception，但不会重试以下类型：
+
+* `ValueError`
+* `TypeError`
+* `ArithmeticError`
+* `ImportError`
+* `LookupError`
+* `NameError`
+* `SyntaxError`
+* `RuntimeError`
+* `ReferenceError`
+* `StopIteration`
+* `StopAsyncIteration`
+* `OSError`
+
+对于 `requests`、`httpx` 等常见 HTTP Library 的 Exception，默认只会重试 5xx Status Code。
+:::
+
+:::js
+把 `retryPolicy` 参数传给 [`addNode`](https://reference.langchain.com/javascript/classes/_langchain_langgraph.index.Graph.html#addnode) 即可配置。下面把默认 `RetryPolicy` 绑定到 Node：
+
+```typescript
+import { RetryPolicy } from "@langchain/langgraph";
+
+const graph = new StateGraph(State)
+  .addNode("nodeName", nodeFunction, { retryPolicy: {} })
+  .compile();
+```
+
+默认 Retry Policy 会重试大多数异常，但不包括：
+
+* `TypeError`
+* `SyntaxError`
+* `ReferenceError`
+:::
+
+<Accordion title="扩展示例：自定义 Retry Policy">
+  :::python
+  假设需要读取 SQL Database。下面为不同 Node 配置不同 Retry Policy：
+
+  ```python
+  import sqlite3
+  from typing_extensions import TypedDict
+  from langchain.chat_models import init_chat_model
+  from langgraph.graph import END, MessagesState, StateGraph, START
+  from langgraph.types import RetryPolicy
+  from langchain.messages import AIMessage
+
+  con = sqlite3.connect(":memory:")
+  model = init_chat_model("claude-haiku-4-5-20251001")
+
+  def query_database(state: MessagesState):
+      cursor = con.cursor()
+      cursor.execute("SELECT * FROM Artist LIMIT 10;")
+      query_result = str(cursor.fetchall())
+      return {"messages": [AIMessage(content=query_result)]}
+
+  def call_model(state: MessagesState):
+      response = model.invoke(state["messages"])
+      return {"messages": [response]}
+
+  builder = StateGraph(MessagesState)
+  builder.add_node(
+      "query_database",
+      query_database,
+      retry_policy=RetryPolicy(retry_on=sqlite3.OperationalError),
+  )
+  builder.add_node("model", call_model, retry_policy=RetryPolicy(max_attempts=5))
+  builder.add_edge(START, "model")
+  builder.add_edge("model", "query_database")
+  builder.add_edge("query_database", END)
+  graph = builder.compile()
+  ```
+  :::
+
+  :::js
+  假设需要读取 SQL Database。下面为两个 Node 配置不同 Retry Policy：
+
+  ```typescript
+  import Database from "better-sqlite3";
+  import { ChatAnthropic } from "@langchain/anthropic";
+  import { StateGraph, StateSchema, MessagesValue, GraphNode, START, END } from "@langchain/langgraph";
+  import { AIMessage } from "@langchain/core/messages";
+
+  const State = new StateSchema({
+    messages: MessagesValue,
+  });
+
+  const db: typeof Database.prototype = new Database(":memory:");
+  const model = new ChatAnthropic({ model: "claude-sonnet-4-6" });
+
+  const callModel: GraphNode<typeof State> = async (state) => {
+    const response = await model.invoke(state.messages);
+    return { messages: [response] };
+  };
+
+  const queryDatabase: GraphNode<typeof State> = async (state) => {
+    const queryResult: string = JSON.stringify(
+      db.prepare("SELECT * FROM Artist LIMIT 10;").all(),
+    );
+    return { messages: [new AIMessage({ content: "queryResult" })] };
+  };
+
+  const workflow = new StateGraph(State)
+    .addNode("call_model", callModel, { retryPolicy: { maxAttempts: 5 } })
+    .addNode("query_database", queryDatabase, {
+      retryPolicy: {
+        retryOn: (e: any): boolean => {
+          if (e instanceof Database.SqliteError) {
+            return e.code === "SQLITE_BUSY";
+          }
+          return false;
+        },
+      },
+    })
+    .addEdge(START, "call_model")
+    .addEdge("call_model", "query_database")
+    .addEdge("query_database", END);
+
+  const graph = workflow.compile();
+  ```
+  :::
+</Accordion>
+
+:::python
+
+## 设置 Node Timeout
+
+使用 @[`add_node`] 的 `timeout` 参数，可以限制单次 Async Node Invocation 的最长运行时间。可以传秒数或 `datetime.timedelta`。
+
+```python
+import asyncio
+from typing_extensions import TypedDict
+
+from langgraph.errors import NodeTimeoutError
+from langgraph.graph import END, START, StateGraph
+
+class State(TypedDict):
+    value: str
+
+async def call_model(state: State) -> State:
+    await asyncio.sleep(2)
+    return {"value": "done"}
+
+builder = StateGraph(State)
+builder.add_node("model", call_model, timeout=1.0)
+builder.add_edge(START, "model")
+builder.add_edge("model", END)
+graph = builder.compile()
+
+try:
+    await graph.ainvoke({"value": "start"})
+except NodeTimeoutError:
+    print("Node timed out")
+```
+
+Node Timeout 只支持 Async Node。如果对 Sync Node 设置 `timeout`，Graph 编译时会抛出错误，因为 Python 的同步执行无法在同一进程中安全取消。
+
+Node 超时后，LangGraph 抛出 `NodeTimeoutError`，它继承自 Python 内置 `TimeoutError`。如果 Node 的 `retry_policy` 会重试 `TimeoutError` 或 `NodeTimeoutError`，那么超时 Attempt 会被重试。每次 Attempt 都有独立计时器。
+
+超时 Attempt 不会提交其 Buffered Writes，这可以防止 State Update 或 Child Task Scheduling 在 Timeout Boundary 之后泄漏出去。
+
+## 配置更细粒度 Timeout Policy
+
+@[`add_node`] 的 `timeout=` 参数还可以接收 @[`TimeoutPolicy`]，分别控制 Run Timeout 与 Idle Timeout。
+
+<Note>
+Per-node Timeout 需要 `langgraph>=1.2`。
+</Note>
+
+```python
+from langgraph.types import TimeoutPolicy
+
+builder.add_node(
+    "call_model",
+    call_model,
+    timeout=TimeoutPolicy(run_timeout=120, idle_timeout=30),
+)
+```
+
+完整 Timeout Lifecycle、Idle Timeout Refresh Source 与 `runtime.heartbeat()` 参见[容错](/oss/langgraph/fault-tolerance#timeouts)。
+
+## 处理 Node Error
+
+@[`add_node`] 的 `error_handler=` 参数注册一个函数：当 Node 失败并耗尽所有 Retry 后执行。Handler 会接收当前 State 与带有 Failure Context 的 @[`NodeError`]，并可以通过 @[`Command`] 路由到恢复分支：
+
+<Note>
+Node-level Error Handler 需要 `langgraph>=1.2`。
+</Note>
+
+```python
+from langgraph.errors import NodeError
+from langgraph.types import Command, RetryPolicy
+
+def payment_error_handler(state: State, error: NodeError) -> Command:
+    return Command(
+        update={"status": f"compensated: {error.error}"},
+        goto="finalize",
+    )
+
+builder.add_node(
+    "charge_payment",
+    charge_payment,
+    retry_policy=RetryPolicy(max_attempts=3, retry_on=ConnectionError),
+    error_handler=payment_error_handler,
+)
+```
+
+补偿模式与 `Command` Routing 参见[容错](/oss/langgraph/fault-tolerance#error-handling)。
+
+## 设置 Graph-wide Node Defaults
+
+<Note>
+需要 `langgraph>=1.2`。
+</Note>
+
+使用 @[`set_node_defaults`]，可以一次性为 Graph 中所有 Node 设置 `retry_policy`、`timeout`、`cache_policy` 或 `error_handler`，无需在每次 @[`add_node`] 时重复。Per-node 显式配置始终优先；Default 会在 @[`StateGraph.compile`] 时应用：
+
+```python
+from langgraph.types import RetryPolicy, TimeoutPolicy
+
+graph = (
+    StateGraph(State)
+    .set_node_defaults(
+        retry_policy=RetryPolicy(max_attempts=3),
+        timeout=TimeoutPolicy(run_timeout=30),
+        error_handler=fallback_handler,
+    )
+    .add_node("a", node_a)
+    .add_node("b", node_b, retry_policy=RetryPolicy(max_attempts=5))  # overrides default
+    .add_edge(START, "a")
+    .compile()
+)
+```
+
+`retry_policy` 与 `timeout` Default 会应用到所有 Node，包括 Error Handler Node。`cache_policy` 与 `error_handler` Default 只应用于普通 Node——Handler 不会捕获自身错误，也不能安全缓存 Handler Result。Default 不会自动继承到 Subgraph。
+
+完整优先级与适用范围参见[容错：Graph Defaults](/oss/langgraph/fault-tolerance#graph-defaults)。
+
+:::
+
+:::python
+### 在 Node 内访问 Execution Info
+
+通过 `runtime.execution_info` 可以访问执行身份与 Retry 信息，而无需直接读取 `config`。
+
+| 属性 | 类型 | 说明 |
+| --------- | ---- | ----------- |
+| `thread_id` | `str \| None` | 当前执行的 Thread ID；没有 Checkpointer 时为 `None` |
+| `run_id` | `str \| None` | 当前执行的 Run ID；Config 未提供时为 `None` |
+| `checkpoint_id` | `str` | 当前执行的 Checkpoint ID |
+| `checkpoint_ns` | `str` | 当前执行的 Checkpoint Namespace |
+| `task_id` | `str` | 当前执行的 Task ID |
+| `node_attempt` | `int` | 当前 Node Attempt 编号（从 1 开始） |
+| `node_first_attempt_time` | `float \| None` | 第一次 Attempt 开始的 Unix Timestamp；重试时保持不变 |
+
+#### 获取 Thread 与 Run ID
+
+```python
+from langgraph.graph import StateGraph, START, END
+from langgraph.runtime import Runtime
+from typing_extensions import TypedDict
+
+class State(TypedDict):
+    result: str
+
+def my_node(state: State, runtime: Runtime):
+    info = runtime.execution_info
+    print(f"Thread: {info.thread_id}, Run: {info.run_id}")
+    return {"result": "done"}
+
+builder = StateGraph(State)
+builder.add_node("my_node", my_node)
+builder.add_edge(START, "my_node")
+builder.add_edge("my_node", END)
+graph = builder.compile()
+```
+
+#### 根据 Retry State 调整行为
+
+```python
+from langgraph.graph import StateGraph, START, END
+from langgraph.runtime import Runtime
+from langgraph.types import RetryPolicy
+from typing_extensions import TypedDict
+
+class State(TypedDict):
+    result: str
+
+def my_node(state: State, runtime: Runtime):
+    info = runtime.execution_info
+    if info.node_attempt > 1:
+        return {"result": call_fallback_api()}
+    return {"result": call_primary_api()}
+
+builder = StateGraph(State)
+builder.add_node("my_node", my_node, retry_policy=RetryPolicy(max_attempts=3))
+builder.add_edge(START, "my_node")
+builder.add_edge("my_node", END)
+graph = builder.compile()
+```
+
+即使没有 Retry Policy，`execution_info` 仍然可用：`node_attempt` 默认值为 `1`，`node_first_attempt_time` 为 Node 开始执行的时间。
+
+### 在 Node 内访问 Server Info
+
+当 Graph 运行在 LangGraph Server 上时，可以通过 `runtime.server_info` 访问 Server-specific Metadata，而无需从 Config Metadata 或 Configurable Key 中读取。
+
+| 属性 | 类型 | 说明 |
+| --------- | ---- | ----------- |
+| `assistant_id` | `str` | 当前 Deployment 的 Assistant ID |
+| `graph_id` | `str` | 当前 Deployment 的 Graph ID |
+| `user` | `BaseUser \| None` | 如果配置了[自定义认证](/langsmith/custom-auth)，则为当前认证用户 |
+
+```python
+from langgraph.graph import StateGraph, START, END
+from langgraph.runtime import Runtime
+from typing_extensions import TypedDict
+
+class State(TypedDict):
+    result: str
+
+def my_node(state: State, runtime: Runtime):
+    server = runtime.server_info
+    if server is not None:
+        print(f"Assistant: {server.assistant_id}, Graph: {server.graph_id}")
+        if server.user is not None:
+            print(f"User: {server.user.identity}")
+    return {"result": "done"}
+
+builder = StateGraph(State)
+builder.add_node("my_node", my_node)
+builder.add_edge(START, "my_node")
+builder.add_edge("my_node", END)
+graph = builder.compile()
+```
+
+Graph 不在 LangGraph Server 上运行（例如本地开发或测试）时，`server_info` 为 `None`。
+
+<Note>
+`runtime.execution_info` 与 `runtime.server_info` 需要 `deepagents>=0.5.0`（或 `langgraph>=1.1.5`）。
+</Note>
+
+### 在 Node 内访问 Drain State
+
+请求[优雅关闭](/oss/langgraph/fault-tolerance#graceful-shutdown)后，`runtime.drain_requested` 会变为 `True`。可以在 Node 内读取它，在下一个 Superstep Boundary 到达前跳过昂贵操作：
+
+```python
+from langgraph.runtime import Runtime
+
+def my_node(state: State, runtime: Runtime) -> State:
+    if runtime.drain_requested:
+        return {"status": "skipped", "reason": runtime.drain_reason}
+    return {"status": do_work()}
+```
+
+| Property | Type | Description |
+| -------- | ---- | ----------- |
+| `drain_requested` | `bool` | 当前 Run 是否已经调用 `RunControl.request_drain()` |
+| `drain_reason` | `str \| None` | `request_drain()` 传入的 Reason；未请求时为 `None` |
+
+<Note>
+需要 `langgraph>=1.2`。完整 `RunControl` API 参见[优雅关闭](/oss/langgraph/fault-tolerance#graceful-shutdown)。
+</Note>
+
+:::
+
+:::js
+### 在 Node 内访问 Execution Info
+
+通过 `runtime.executionInfo` 可以访问 Thread、Run、Checkpoint 与 Retry 信息，而无需直接读取 `config`。
+
+| 属性 | 类型 | 说明 |
+| --------- | ---- | ----------- |
+| `threadId` | `string \| undefined` | 当前执行 Thread ID |
+| `runId` | `string \| undefined` | 当前执行 Run ID |
+| `checkpointId` | `string` | 当前 Checkpoint ID |
+| `checkpointNs` | `string` | 当前 Checkpoint Namespace |
+| `taskId` | `string` | 当前 Task ID |
+| `nodeAttempt` | `number` | Node Attempt 编号（从 1 开始） |
+| `nodeFirstAttemptTime` | `number \| undefined` | 第一次 Attempt 开始的 Unix Timestamp；重试时保持不变 |
+
+```ts
+import { StateGraph, StateSchema, START, END } from "@langchain/langgraph";
+import * as z from "zod";
+
+const State = new StateSchema({
+  result: z.string(),
+});
+
+const myNode: GraphNode<typeof State> = async (state, runtime) => {
+  const info = runtime.executionInfo;
+  console.log(`Thread: ${info.threadId}, Run: ${info.runId}`);
+  return { result: "done" };
+};
+
+const graph = new StateGraph(State)
+  .addNode("my_node", myNode)
+  .addEdge(START, "my_node")
+  .addEdge("my_node", END)
+  .compile();
+```
+
+使用 `nodeAttempt` 可以在 Retry 时切换到 Fallback：
+
+```ts
+const myNode: GraphNode<typeof State> = async (state, runtime) => {
+  const info = runtime.executionInfo;
+  if (info.nodeAttempt > 1) {
+    return { result: await callFallbackApi() };
+  }
+  return { result: await callPrimaryApi() };
+};
+```
+
+### 在 Node 内访问 Server Info
+
+Graph 运行在 LangGraph Server 上时，可以通过 `runtime.serverInfo` 获取 Server-specific Metadata。
+
+| 属性 | 类型 | 说明 |
+| --------- | ---- | ----------- |
+| `assistantId` | `string` | 当前 Deployment 的 Assistant ID |
+| `graphId` | `string` | 当前 Deployment 的 Graph ID |
+| `user` | `BaseUser \| null` | 配置[自定义认证](/langsmith/custom-auth)时的认证用户 |
+
+```ts
+const myNode: GraphNode<typeof State> = async (state, runtime) => {
+  const server = runtime.serverInfo;
+  if (server != null) {
+    console.log(`Assistant: ${server.assistantId}, Graph: ${server.graphId}`);
+    if (server.user != null) {
+      console.log(`User: ${server.user.identity}`);
+    }
+  }
+  return { result: "done" };
+};
+```
+
+Graph 不在 LangGraph Server 上运行时，`serverInfo` 为 `null`。
+
+<Note>
+`runtime.executionInfo` 与 `runtime.serverInfo` 需要 `deepagents>=1.9.0`（或 `@langchain/langgraph>=1.2.8`）。
+</Note>
+:::
+
+:::python
+## 添加 Node Cache
+
+当某个操作代价很高（耗时或耗钱），可以使用 Node Cache 避免重复执行。LangGraph 支持为每个 Node 单独配置 Cache Policy。
+
+把 `cache_policy` 传给 @[`add_node`]。下面使用 TTL 120 秒和默认 `key_func`：
+
+```python
+from langgraph.types import CachePolicy
+
+builder.add_node(
+    "node_name",
+    node_function,
+    cache_policy=CachePolicy(ttl=120),
+)
+```
+
+随后在编译 Graph 时传入 `cache`。下面使用 `InMemoryCache`；此外也提供 `SqliteCache`：
+
+```python
+from langgraph.cache.memory import InMemoryCache
+
+graph = builder.compile(cache=InMemoryCache())
+```
+:::
+
+## 创建顺序步骤
+
+<Info>
+**前置知识**
+本节假设你已经熟悉上面的 [State](#define-and-update-state) 内容。
+</Info>
+
+这里展示如何构建简单的顺序 Workflow：
+
+1. 如何构建 Sequential Graph
+2. 如何使用内置 Shorthand 构建相同结构
+
+:::python
+通过 [Graph](/oss/langgraph/graph-api#stategraph) 的 @[`add_node`] 与 @[`add_edge`] 添加一组顺序 Node：
+
+```python
+from langgraph.graph import START, StateGraph
 
 builder = StateGraph(State)
 
-def node_a(state: State):
-    return {"value": state["value"] + 1}
+builder.add_node(step_1)
+builder.add_node(step_2)
+builder.add_node(step_3)
 
-builder.add_node("node_a", node_a)
+builder.add_edge(START, "step_1")
+builder.add_edge("step_1", "step_2")
+builder.add_edge("step_2", "step_3")
+```
+
+也可以使用内置 `.add_sequence`：
+
+```python
+builder = StateGraph(State).add_sequence([step_1, step_2, step_3])
+builder.add_edge(START, "step_1")
+```
+:::
+
+:::js
+通过 `.addNode` 与 `.addEdge` 添加顺序 Node：
+
+```typescript
+import { START, StateGraph } from "@langchain/langgraph";
+
+const builder = new StateGraph(State)
+  .addNode("step1", step1)
+  .addNode("step2", step2)
+  .addNode("step3", step3)
+  .addEdge(START, "step1")
+  .addEdge("step1", "step2")
+  .addEdge("step2", "step3");
+```
+:::
+
+<Accordion title="为什么要用 LangGraph 把应用步骤拆成 Sequence？">
+LangGraph 可以很方便地为应用增加底层持久化层，使 Node 执行之间的 State 能够被 Checkpoint。因此 Node 的边界会决定：
+
+* State Update 如何被[保存为 Checkpoint](/oss/langgraph/persistence)
+* [人在回路](/oss/langgraph/interrupts) Workflow 中断后如何恢复
+* 如何使用 LangGraph 的[时间旅行](/oss/langgraph/use-time-travel)能力“回退”并从历史状态创建新分支
+* 执行步骤如何被[流式输出](/oss/langgraph/streaming)
+* 应用如何在 [Studio](/langsmith/studio) 中可视化和调试
+
+下面构建由三个步骤组成的完整例子：
+
+1. 给 State 中一个 Key 填充值
+2. 更新同一个值
+3. 给另一个 Key 填充值
+
+:::python
+```python
+from typing_extensions import TypedDict
+
+class State(TypedDict):
+    value_1: str
+    value_2: int
+
+def step_1(state: State):
+    return {"value_1": "a"}
+
+def step_2(state: State):
+    current_value_1 = state["value_1"]
+    return {"value_1": f"{current_value_1} b"}
+
+def step_3(state: State):
+    return {"value_2": 10}
 ```
 :::
 
 :::js
 ```typescript
-const nodeA: typeof State.Node = async (state) => {
-  return { value: state.value + 1 };
+import { StateSchema, GraphNode } from "@langchain/langgraph";
+import * as z from "zod";
+
+const State = new StateSchema({
+  value1: z.string(),
+  value2: z.number(),
+});
+
+const step1: GraphNode<typeof State> = (state) => ({ value1: "a" });
+const step2: GraphNode<typeof State> = (state) => ({ value1: `${state.value1} b` });
+const step3: GraphNode<typeof State> = (state) => ({ value2: 10 });
+```
+:::
+
+<Note>
+每个 Node 只需要返回自己希望更新的 Key。默认会**覆盖**该 Key 的旧值；也可以使用 [Reducer](/oss/langgraph/graph-api#reducers) 改变 Update 规则，例如把连续 Update 追加到同一个 Key。
+</Note>
+
+:::python
+```python
+from langgraph.graph import START, StateGraph
+
+builder = StateGraph(State)
+builder.add_node(step_1)
+builder.add_node(step_2)
+builder.add_node(step_3)
+builder.add_edge(START, "step_1")
+builder.add_edge("step_1", "step_2")
+builder.add_edge("step_2", "step_3")
+graph = builder.compile()
+```
+:::
+
+:::js
+```typescript
+import { START, StateGraph } from "@langchain/langgraph";
+
+const graph = new StateGraph(State)
+  .addNode("step1", step1)
+  .addNode("step2", step2)
+  .addNode("step3", step3)
+  .addEdge(START, "step1")
+  .addEdge("step1", "step2")
+  .addEdge("step2", "step3")
+  .compile();
+```
+:::
+
+:::python
+<Tip>
+可以在 @[`add_node`] 中显式指定自定义 Node Name：
+```python
+builder.add_node("my_node", step_1)
+```
+</Tip>
+:::
+
+:::js
+<Tip>
+可以在 `.addNode` 中显式指定自定义 Node Name：
+```typescript
+const graph = new StateGraph(State).addNode("myNode", step1).compile();
+```
+</Tip>
+:::
+
+Graph 会在没有更多 Node 可执行时停止。编译 Graph 会对结构做基础检查，例如识别 Orphan Node；如果使用 [Checkpointer](/oss/langgraph/persistence)，也会在这里传入。
+
+```python
+graph = builder.compile()
+```
+
+可以使用内置 Visualization 查看 Sequence。
+
+```python
+graph.invoke({"value_1": "c"})
+```
+
+```
+{'value_1': 'a b', 'value_2': 10}
+```
+
+注意：输入值 `c` 被第一个 Node 覆盖；第二个 Node 更新该值；第三个 Node 写入另一个 Key。
+
+:::python
+<Tip>
+`langgraph>=0.2.46` 提供 `add_sequence` Shorthand：
+
+```python
+builder = StateGraph(State).add_sequence([step_1, step_2, step_3])
+builder.add_edge(START, "step_1")
+graph = builder.compile()
+graph.invoke({"value_1": "c"})
+```
+</Tip>
+:::
+</Accordion>
+
+## 创建分支
+
+并行执行 Node 对提升 Graph 整体性能非常重要。LangGraph 原生支持 Fan-out / Fan-in，并可以结合普通 Edge 与 Conditional Edge 构建分支数据流。
+
+### 并行运行 Graph Node
+
+下面从 `A` 扇出到 `B` 和 `C`，再汇聚到 `D`。State 使用加法 Reducer，使各分支写入的值被累计，而不是相互覆盖。
+
+:::python
+```python
+import operator
+from typing import Annotated, Any
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+
+class State(TypedDict):
+    aggregate: Annotated[list, operator.add]
+
+def a(state: State):
+    print(f'Adding "A" to {state["aggregate"]}')
+    return {"aggregate": ["A"]}
+
+def b(state: State):
+    print(f'Adding "B" to {state["aggregate"]}')
+    return {"aggregate": ["B"]}
+
+def c(state: State):
+    print(f'Adding "C" to {state["aggregate"]}')
+    return {"aggregate": ["C"]}
+
+def d(state: State):
+    print(f'Adding "D" to {state["aggregate"]}')
+    return {"aggregate": ["D"]}
+
+builder = StateGraph(State)
+builder.add_node(a)
+builder.add_node(b)
+builder.add_node(c)
+builder.add_node(d)
+builder.add_edge(START, "a")
+builder.add_edge("a", "b")
+builder.add_edge("a", "c")
+builder.add_edge("b", "d")
+builder.add_edge("c", "d")
+builder.add_edge("d", END)
+graph = builder.compile()
+```
+:::
+
+:::js
+```typescript
+import { StateGraph, StateSchema, ReducedValue, GraphNode, START, END } from "@langchain/langgraph";
+import * as z from "zod";
+
+const State = new StateSchema({
+  aggregate: new ReducedValue(
+    z.array(z.string()).default(() => []),
+    { reducer: (x, y) => x.concat(y) }
+  ),
+});
+
+const nodeA: GraphNode<typeof State> = (state) => ({ aggregate: ["A"] });
+const nodeB: GraphNode<typeof State> = (state) => ({ aggregate: ["B"] });
+const nodeC: GraphNode<typeof State> = (state) => ({ aggregate: ["C"] });
+const nodeD: GraphNode<typeof State> = (state) => ({ aggregate: ["D"] });
+
+const graph = new StateGraph(State)
+  .addNode("a", nodeA)
+  .addNode("b", nodeB)
+  .addNode("c", nodeC)
+  .addNode("d", nodeD)
+  .addEdge(START, "a")
+  .addEdge("a", "b")
+  .addEdge("a", "c")
+  .addEdge("b", "d")
+  .addEdge("c", "d")
+  .addEdge("d", END)
+  .compile();
+```
+:::
+
+使用 Reducer 后，各 Node 的更新会累积。`b` 和 `c` 在同一个 [Superstep](/oss/langgraph/graph-api#graphs) 中并发执行；`d` 会在二者都完成后执行。
+
+<Note>
+并行 Superstep 中 Update 的顺序不保证稳定。如果业务需要确定顺序，建议把各分支输出写到独立 Field，并同时附带排序值，随后显式排序。
+</Note>
+
+<Accordion title="异常如何处理？">
+LangGraph 以 [Superstep](/oss/langgraph/graph-api#graphs) 为事务边界。并行分支虽然同时执行，但整个 Superstep 是**事务性的**：如果其中任意 Branch 抛出 Exception，则这个 Superstep 的 State Update 都不会应用。
+
+使用 [Checkpointer](/oss/langgraph/persistence) 时，同一 Superstep 中成功 Node 的结果仍会保存；恢复执行后，这些成功 Node 不会重复运行。
+
+对于容易失败的 API Call，可以：
+
+1. 在 Node 中使用普通 Python / TypeScript Error Handling 捕获并处理异常。
+2. 配置 `RetryPolicy`，仅重试失败 Branch，不重复成功 Branch。
+</Accordion>
+
+<Tip>
+可以通过 Invocation Config 的 `max_concurrency` 控制最大并发任务数量。
+</Tip>
+
+:::python
+### 延迟 Node 执行
+
+当分支长度不同，希望某个 Node 等待所有 Pending Task 完成后再运行时，可以使用 `defer=True`。
+
+```python
+import operator
+from typing import Annotated
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+
+class State(TypedDict):
+    aggregate: Annotated[list, operator.add]
+
+def a(state: State): return {"aggregate": ["A"]}
+def b(state: State): return {"aggregate": ["B"]}
+def b_2(state: State): return {"aggregate": ["B_2"]}
+def c(state: State): return {"aggregate": ["C"]}
+def d(state: State): return {"aggregate": ["D"]}
+
+builder = StateGraph(State)
+builder.add_node(a)
+builder.add_node(b)
+builder.add_node(b_2)
+builder.add_node(c)
+builder.add_node(d, defer=True)
+builder.add_edge(START, "a")
+builder.add_edge("a", "b")
+builder.add_edge("a", "c")
+builder.add_edge("b", "b_2")
+builder.add_edge("b_2", "d")
+builder.add_edge("c", "d")
+builder.add_edge("d", END)
+graph = builder.compile()
+```
+
+`b` 与 `c` 同一个 Superstep 并发执行；由于 `d` 设置了 `defer=True`，它会等所有 Pending Task 完成，因此会等完整 `b` Branch 结束。
+
+当所有 Branch 都必然执行时，也可以使用 List-form Edge：
+
+```python
+builder.add_edge(["b_2", "c"], "d")
+```
+
+三种方式含义不同：
+
+- **List of start nodes**：只有列出的所有 Node 都执行完成后，`d` 才执行一次。如果某个 Node 根本没被 Conditional Edge 选择，`d` 不会执行。
+- **Separate edges**：只要某个 Incoming Branch 在某个 Superstep 完成，`d` 就会运行；如果分支长度不同，可能多次执行。
+- **Separate edges + `defer=True`**：等待所有被实际选择的 Branch 完成后，只执行一次 `d`。
+
+`defer=True` 等待的是整个 Graph 中没有 Pending Task，而不仅是直接连接到它的 Branch。针对该 Node 的 `Send` 仍会单独触发一次执行。
+:::
+
+### 条件分支
+
+如果 Fan-out 需要根据 Runtime State 动态变化，可以使用 Conditional Edge 选择一个或多个目标 Node。
+
+:::python
+```python
+import operator
+from typing import Annotated, Literal, Sequence
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+
+class State(TypedDict):
+    aggregate: Annotated[list, operator.add]
+    which: str
+
+def a(state: State):
+    return {"aggregate": ["A"], "which": "c"}
+
+def b(state: State): return {"aggregate": ["B"]}
+def c(state: State): return {"aggregate": ["C"]}
+
+builder = StateGraph(State)
+builder.add_node(a)
+builder.add_node(b)
+builder.add_node(c)
+builder.add_edge(START, "a")
+builder.add_edge("b", END)
+builder.add_edge("c", END)
+
+def conditional_edge(state: State) -> Literal["b", "c"]:
+    return state["which"]
+
+builder.add_conditional_edges("a", conditional_edge)
+graph = builder.compile()
+```
+:::
+
+:::js
+```typescript
+import { StateGraph, StateSchema, ReducedValue, GraphNode, ConditionalEdgeRouter, START, END } from "@langchain/langgraph";
+import * as z from "zod";
+
+const State = new StateSchema({
+  aggregate: new ReducedValue(
+    z.array(z.string()).default(() => []),
+    { reducer: (x, y) => x.concat(y) }
+  ),
+  which: z.string(),
+});
+
+const nodeA: GraphNode<typeof State> = (state) => ({ aggregate: ["A"], which: "c" });
+const nodeB: GraphNode<typeof State> = (state) => ({ aggregate: ["B"] });
+const nodeC: GraphNode<typeof State> = (state) => ({ aggregate: ["C"] });
+
+const conditionalEdge: ConditionalEdgeRouter<{ InputSchema: typeof State; Nodes: "b" | "c" }> = (state) => {
+  return state.which as "b" | "c";
 };
 
-builder.addNode("nodeA", nodeA);
+const graph = new StateGraph(State)
+  .addNode("a", nodeA)
+  .addNode("b", nodeB)
+  .addNode("c", nodeC)
+  .addEdge(START, "a")
+  .addEdge("b", END)
+  .addEdge("c", END)
+  .addConditionalEdges("a", conditionalEdge)
+  .compile();
 ```
 :::
 
-一个好的 Node 通常对应一个有意义的业务阶段，并且值得独立 Trace、Retry 或 Resume。
+<Tip>
+Conditional Edge 可以一次路由到多个目标 Node：
 
-### Async Node
-
-I/O 密集型操作建议使用 Async Node：
-
-:::python
 ```python
-async def call_api(state: State):
-    result = await client.fetch(state["query"])
-    return {"result": result}
+def route_bc_or_cd(state: State) -> Sequence[str]:
+    if state["which"] == "cd":
+        return ["c", "d"]
+    return ["b", "c"]
 ```
-:::
+</Tip>
 
-### 在 Node 中访问 Config
+## Map-Reduce 与 Send API
 
-:::python
-```python
-from langchain_core.runnables import RunnableConfig
-
-
-def node(state: State, config: RunnableConfig):
-    thread_id = config["configurable"]["thread_id"]
-    return {}
-```
-:::
-
-Config 适合放一次 Invocation 的执行参数，例如 Thread ID、Tag、Metadata 等。
-
-<a id="add-runtime-configuration"></a>
-## 添加 Runtime Context
-
-Model Client、数据库连接、Tenant ID 等依赖不应该塞进持久化 State。可以通过 Runtime Context 注入。
+LangGraph 使用 Send API 支持 Map-Reduce 和其他高级 Branching Pattern。`Send` 可以为每个动态分支提供独立 Input，同时让这些分支的输出通过 Reducer 汇总回主 State。
 
 :::python
 ```python
-from dataclasses import dataclass
-from langgraph.graph import StateGraph
-from langgraph.runtime import Runtime
+from langgraph.graph import StateGraph, START, END
+from langgraph.types import Send
+from typing_extensions import TypedDict, Annotated
+import operator
 
-@dataclass
-class Context:
-    user_id: str
-    model_name: str = "gpt-5.4-mini"
+class OverallState(TypedDict):
+    topic: str
+    subjects: list[str]
+    jokes: Annotated[list[str], operator.add]
+    best_selected_joke: str
 
-builder = StateGraph(State, context_schema=Context)
+def generate_topics(state: OverallState):
+    return {"subjects": ["lions", "elephants", "penguins"]}
 
+def generate_joke(state: OverallState):
+    joke_map = {
+        "lions": "Why don't lions like fast food? Because they can't catch it!",
+        "elephants": "Why don't elephants use computers? They're afraid of the mouse!",
+        "penguins": "Why don't penguins like talking to strangers at parties? Because they find it hard to break the ice."
+    }
+    return {"jokes": [joke_map[state["subject"]]]}
 
-def node(state: State, runtime: Runtime[Context]):
-    user_id = runtime.context.user_id
-    return {"owner": user_id}
+def continue_to_jokes(state: OverallState):
+    return [Send("generate_joke", {"subject": s}) for s in state["subjects"]]
 
-# Later
-graph.invoke(
-    input,
-    context=Context(user_id="u-123"),
-)
+def best_joke(state: OverallState):
+    return {"best_selected_joke": "penguins"}
+
+builder = StateGraph(OverallState)
+builder.add_node("generate_topics", generate_topics)
+builder.add_node("generate_joke", generate_joke)
+builder.add_node("best_joke", best_joke)
+builder.add_edge(START, "generate_topics")
+builder.add_conditional_edges("generate_topics", continue_to_jokes, ["generate_joke"])
+builder.add_edge("generate_joke", "best_joke")
+builder.add_edge("best_joke", END)
+graph = builder.compile()
 ```
 :::
 
 :::js
 ```typescript
-const Context = z.object({
-  userId: z.string(),
-  modelName: z.string().default("gpt-5.4-mini"),
+import { StateGraph, StateSchema, ReducedValue, GraphNode, START, END, Send } from "@langchain/langgraph";
+import * as z from "zod";
+
+const OverallState = new StateSchema({
+  topic: z.string(),
+  subjects: z.array(z.string()),
+  jokes: new ReducedValue(
+    z.array(z.string()).default(() => []),
+    { reducer: (x, y) => x.concat(y) }
+  ),
+  bestSelectedJoke: z.string(),
 });
 
-const builder = new StateGraph(State, Context);
-```
-:::
-
-Runtime 还可以提供 `store`、Stream Writer、Heartbeat 等运行时能力。
-
-## 添加 Edge
-
-普通 Edge 表示固定控制流：
-
-:::python
-```python
-from langgraph.graph import START, END
-
-builder.add_edge(START, "node_a")
-builder.add_edge("node_a", "node_b")
-builder.add_edge("node_b", END)
-```
-:::
-
-:::js
-```typescript
-builder
-  .addEdge(START, "nodeA")
-  .addEdge("nodeA", "nodeB")
-  .addEdge("nodeB", END);
-```
-:::
-
-如果一个 Node 有多条普通出边，下一个 Super-step 中会并行执行这些目标 Node。
-
-## 条件 Edge
-
-Routing Function 读取 State，并返回目标 Node 名称：
-
-:::python
-```python
-from typing import Literal
-
-
-def route(state: State) -> Literal["retry", "finish"]:
-    if state["score"] < 0.8:
-        return "retry"
-    return "finish"
-
-builder.add_conditional_edges("evaluate", route)
-```
-:::
-
-:::js
-```typescript
-builder.addConditionalEdges("evaluate", (state) => {
-  return state.score < 0.8 ? "retry" : "finish";
+const generateTopics: GraphNode<typeof OverallState> = (state) => ({
+  subjects: ["lions", "elephants", "penguins"]
 });
+
+const generateJoke: GraphNode<typeof OverallState> = (state) => {
+  const jokeMap: Record<string, string> = {
+    lions: "Why don't lions like fast food? Because they can't catch it!",
+    elephants: "Why don't elephants use computers? They're afraid of the mouse!",
+    penguins: "Why don't penguins like talking to strangers at parties? Because they find it hard to break the ice."
+  };
+  return { jokes: [jokeMap[state.subject]] };
+};
+
+const continueToJokes: ConditionalEdgeRouter<{ InputSchema: typeof OverallState; Nodes: "generateJoke" }> = (state) => {
+  return state.subjects.map((subject) => new Send("generateJoke", { subject }));
+};
+
+const bestJoke: GraphNode<typeof OverallState> = () => ({ bestSelectedJoke: "penguins" });
+
+const graph = new StateGraph(OverallState)
+  .addNode("generateTopics", generateTopics)
+  .addNode("generateJoke", generateJoke)
+  .addNode("bestJoke", bestJoke)
+  .addEdge(START, "generateTopics")
+  .addConditionalEdges("generateTopics", continueToJokes)
+  .addEdge("generateJoke", "bestJoke")
+  .addEdge("bestJoke", END)
+  .compile();
 ```
 :::
 
-Routing Function 最好保持纯函数，不要在其中执行昂贵副作用。
+## 创建和控制循环
 
-## 使用 Command 同时更新 State 和路由
+构建带 Loop 的 Graph 时，需要一种终止执行的机制。最常见的方式是使用 [Conditional Edge](/oss/langgraph/graph-api#conditional-edges)，在满足终止条件时路由到 [END](/oss/langgraph/graph-api#end-node)。
 
-如果一个 Node 需要同时返回 State Update 和下一个目标，可以返回 `Command`。
+还可以在 Invocation 或 Streaming 时设置 Graph Recursion Limit。它定义 Graph 在抛出错误之前允许执行多少个 [Superstep](/oss/langgraph/graph-api#graphs)。
+
+<Tip>
+如果希望达到 Recursion Limit 时返回最后 State，而不是抛错，请参阅下一节。
+</Tip>
 
 :::python
 ```python
-from typing import Literal
-from langgraph.types import Command
+builder = StateGraph(State)
+builder.add_node(a)
+builder.add_node(b)
 
+def route(state: State) -> Literal["b", END]:
+    if termination_condition(state):
+        return END
+    else:
+        return "b"
 
-def node(state: State) -> Command[Literal["approved", "rejected"]]:
-    if state["score"] > 0.8:
-        return Command(
-            update={"status": "approved"},
-            goto="approved",
-        )
+builder.add_edge(START, "a")
+builder.add_conditional_edges("a", route)
+builder.add_edge("b", "a")
+graph = builder.compile()
+```
+:::
+
+:::js
+```typescript
+const route: ConditionalEdgeRouter<{ InputSchema: typeof State; Nodes: "b" }> = (state) => {
+  if (terminationCondition(state)) {
+    return END;
+  } else {
+    return "b";
+  }
+};
+
+const graph = new StateGraph(State)
+  .addNode("a", nodeA)
+  .addNode("b", nodeB)
+  .addEdge(START, "a")
+  .addConditionalEdges("a", route)
+  .addEdge("b", "a")
+  .compile();
+```
+:::
+
+:::python
+可以通过 Config 中的 `recursion_limit` 控制限制。超过后抛出 `GraphRecursionError`：
+
+```python
+from langgraph.errors import GraphRecursionError
+
+try:
+    graph.invoke(inputs, {"recursion_limit": 3})
+except GraphRecursionError:
+    print("Recursion Error")
+```
+:::
+
+:::js
+```typescript
+import { GraphRecursionError } from "@langchain/langgraph";
+
+try {
+  await graph.invoke(inputs, { recursionLimit: 3 });
+} catch (error) {
+  if (error instanceof GraphRecursionError) {
+    console.log("Recursion Error");
+  }
+}
+```
+:::
+
+下面定义一个简单 Loop，使用 Conditional Edge 实现终止条件：
+
+:::python
+```python
+import operator
+from typing import Annotated, Literal
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+
+class State(TypedDict):
+    aggregate: Annotated[list, operator.add]
+
+def a(state: State):
+    print(f'Node A sees {state["aggregate"]}')
+    return {"aggregate": ["A"]}
+
+def b(state: State):
+    print(f'Node B sees {state["aggregate"]}')
+    return {"aggregate": ["B"]}
+
+builder = StateGraph(State)
+builder.add_node(a)
+builder.add_node(b)
+
+def route(state: State) -> Literal["b", END]:
+    if len(state["aggregate"]) < 7:
+        return "b"
+    else:
+        return END
+
+builder.add_edge(START, "a")
+builder.add_conditional_edges("a", route)
+builder.add_edge("b", "a")
+graph = builder.compile()
+```
+:::
+
+:::js
+```typescript
+import { StateGraph, StateSchema, ReducedValue, GraphNode, ConditionalEdgeRouter, START, END } from "@langchain/langgraph";
+import * as z from "zod";
+
+const State = new StateSchema({
+  aggregate: new ReducedValue(
+    z.array(z.string()).default(() => []),
+    { reducer: (x, y) => x.concat(y) }
+  ),
+});
+
+const nodeA: GraphNode<typeof State> = (state) => ({ aggregate: ["A"] });
+const nodeB: GraphNode<typeof State> = (state) => ({ aggregate: ["B"] });
+const route: ConditionalEdgeRouter<{ InputSchema: typeof State; Nodes: "b" }> = (state) => {
+  if (state.aggregate.length < 7) return "b";
+  return END;
+};
+
+const graph = new StateGraph(State)
+  .addNode("a", nodeA)
+  .addNode("b", nodeB)
+  .addEdge(START, "a")
+  .addConditionalEdges("a", route)
+  .addEdge("b", "a")
+  .compile();
+```
+:::
+
+这个结构类似 [ReAct Agent](/oss/langgraph/workflows-agents)：Node `a` 可以看作支持 Tool Calling 的 Model，Node `b` 可以看作 Tool。
+
+### 强制 Recursion Limit
+
+某些应用无法保证一定会达到业务终止条件。可以设置 Graph [Recursion Limit](/oss/langgraph/graph-api#recursion-limit)，在给定数量的 [Superstep](/oss/langgraph/graph-api#graphs) 后抛出 `GraphRecursionError`，再由应用捕获处理。
+
+:::python
+```python
+from langgraph.errors import GraphRecursionError
+
+try:
+    graph.invoke({"aggregate": []}, {"recursion_limit": 4})
+except GraphRecursionError:
+    print("Recursion Error")
+```
+:::
+
+:::js
+```typescript
+import { GraphRecursionError } from "@langchain/langgraph";
+
+try {
+  await graph.invoke({ aggregate: [] }, { recursionLimit: 4 });
+} catch (error) {
+  if (error instanceof GraphRecursionError) {
+    console.log("Recursion Error");
+  }
+}
+```
+:::
+
+:::python
+<Accordion title="扩展示例：达到 Recursion Limit 时返回 State">
+如果不希望抛出 `GraphRecursionError`，可以在 State 中加入 Remaining Step 计数，并在接近限制时主动走向 END。
+
+LangGraph 提供特殊的 `RemainingSteps` Annotation。底层会创建一个 `ManagedValue` Channel，它只在本次 Graph Run 生命周期内存在。
+
+```python
+import operator
+from typing import Annotated, Literal
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+from langgraph.managed.is_last_step import RemainingSteps
+
+class State(TypedDict):
+    aggregate: Annotated[list, operator.add]
+    remaining_steps: RemainingSteps
+
+def a(state: State):
+    return {"aggregate": ["A"]}
+
+def b(state: State):
+    return {"aggregate": ["B"]}
+
+builder = StateGraph(State)
+builder.add_node(a)
+builder.add_node(b)
+
+def route(state: State) -> Literal["b", END]:
+    if state["remaining_steps"] <= 2:
+        return END
+    else:
+        return "b"
+
+builder.add_edge(START, "a")
+builder.add_conditional_edges("a", route)
+builder.add_edge("b", "a")
+graph = builder.compile()
+
+result = graph.invoke({"aggregate": []}, {"recursion_limit": 4})
+print(result)
+```
+</Accordion>
+:::
+
+:::python
+<Accordion title="扩展示例：包含 Branch 的 Loop">
+更复杂的情况下，一个 Loop 中的某一步可能 Fan-out 到两个 Node。可以把 Graph 理解为一组循环的 Superstep：
+
+1. Node A
+2. Node B
+3. Node C 与 D 并行
+4. Node A
+5. ……
+
+List-form Edge 会等 `c`、`d` 两个 Branch 都完成，再返回 `a`。关于它与 Separate Edge 的区别参见[延迟 Node 执行](#defer-node-execution)。
+
+```python
+import operator
+from typing import Annotated, Literal
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+
+class State(TypedDict):
+    aggregate: Annotated[list, operator.add]
+
+def a(state: State): return {"aggregate": ["A"]}
+def b(state: State): return {"aggregate": ["B"]}
+def c(state: State): return {"aggregate": ["C"]}
+def d(state: State): return {"aggregate": ["D"]}
+
+builder = StateGraph(State)
+builder.add_node(a)
+builder.add_node(b)
+builder.add_node(c)
+builder.add_node(d)
+
+def route(state: State) -> Literal["b", END]:
+    if len(state["aggregate"]) < 7:
+        return "b"
+    return END
+
+builder.add_edge(START, "a")
+builder.add_conditional_edges("a", route)
+builder.add_edge("b", "c")
+builder.add_edge("b", "d")
+builder.add_edge(["c", "d"], "a")
+graph = builder.compile()
+```
+</Accordion>
+:::
+
+:::python
+## Async
+
+对于 I/O Bound 代码（例如并发请求 Model Provider API），使用 Async Programming 可以显著提高性能。
+
+把 Sync Graph 改为 Async Graph 通常需要：
+
+1. Node 从 `def` 改为 `async def`
+2. 在内部适当使用 `await`
+3. 使用 `.ainvoke` 或 `.astream` 调用 Graph
+
+很多 LangChain Object 都实现 Runnable Protocol，并提供 Sync Method 对应的 Async Variant，因此迁移通常很直接。
+
+<ChatModelTabs />
+
+```python
+from langchain.chat_models import init_chat_model
+from langgraph.graph import MessagesState, StateGraph
+
+async def node(state: MessagesState):
+    new_message = await llm.ainvoke(state["messages"])
+    return {"messages": [new_message]}
+
+builder = StateGraph(MessagesState).add_node(node).set_entry_point("node")
+graph = builder.compile()
+
+input_message = {"role": "user", "content": "Hello"}
+result = await graph.ainvoke({"messages": [input_message]})
+```
+
+<Tip>
+Async Streaming 示例参见[流式输出指南](/oss/langgraph/streaming)。
+</Tip>
+:::
+
+## 使用 `Command` 同时更新 State 与控制 Flow
+
+有时希望在同一个 Node 内既更新 State，又决定下一步去哪个 Node。LangGraph 支持从 Node 返回 @[Command]：
+
+:::python
+```python
+def my_node(state: State) -> Command[Literal["my_other_node"]]:
     return Command(
-        update={"status": "rejected"},
-        goto="rejected",
+        update={"foo": "bar"},
+        goto="my_other_node"
     )
 ```
 :::
 
 :::js
 ```typescript
-return new Command({
-  update: { status: "approved" },
-  goto: "approved",
-});
+import { Command } from "@langchain/langgraph";
+
+const myNode = (state: State): Command => {
+  return new Command({
+    update: { foo: "bar" },
+    goto: "myOtherNode"
+  });
+};
 ```
 :::
 
-不要在同一个 Node 上同时配置固定 Edge 和 `Command(goto=...)`，否则两条路径都可能被调度。
-
-<a id="map-reduce-and-the-send-api"></a>
-## Map-Reduce 与 Send API
-
-当并行 Worker 数量在 Runtime 才能确定时，使用 `Send` 动态创建执行分支。
+下面是一个完整例子：先执行 A，然后由 A 的结果决定去 B 还是 C。
 
 :::python
 ```python
-from operator import add
-from typing import Annotated
-from langgraph.types import Send
+import random
+from typing_extensions import TypedDict, Literal
+from langgraph.graph import StateGraph, START
+from langgraph.types import Command
 
 class State(TypedDict):
-    subjects: list[str]
-    jokes: Annotated[list[str], add]
+    foo: str
 
-class WorkerState(TypedDict):
-    subject: str
-    jokes: Annotated[list[str], add]
+def node_a(state: State) -> Command[Literal["node_b", "node_c"]]:
+    print("Called A")
+    value = random.choice(["b", "c"])
+    goto = "node_b" if value == "b" else "node_c"
+    return Command(
+        update={"foo": value},
+        goto=goto,
+    )
 
+def node_b(state: State):
+    print("Called B")
+    return {"foo": state["foo"] + "b"}
 
-def fan_out(state: State):
-    return [
-        Send("generate_joke", {"subject": subject})
-        for subject in state["subjects"]
-    ]
+def node_c(state: State):
+    print("Called C")
+    return {"foo": state["foo"] + "c"}
 
-
-def generate_joke(state: WorkerState):
-    return {"jokes": [f"Joke about {state['subject']}"]}
-
-builder.add_conditional_edges("orchestrator", fan_out, ["generate_joke"])
+builder = StateGraph(State)
+builder.add_edge(START, "node_a")
+builder.add_node(node_a)
+builder.add_node(node_b)
+builder.add_node(node_c)
+graph = builder.compile()
 ```
+
+<Warning>
+`Command[Literal["node_b", "node_c"]]` Return Type Annotation 对 Graph Rendering 很重要，它告诉 LangGraph `node_a` 可能导航到哪些 Node。
+</Warning>
 :::
 
-这正是 Orchestrator-Worker、动态 Map-Reduce 等模式的基础。
+:::js
+```typescript
+import { StateGraph, StateSchema, GraphNode, Command, START } from "@langchain/langgraph";
+import * as z from "zod";
 
-## 等待多个并行分支汇合
+const State = new StateSchema({ foo: z.string() });
 
-多个 Node 可以并行执行，并在同一个后继 Node 汇合：
+const nodeA: GraphNode<{ InputSchema: typeof State; Nodes: "nodeB" | "nodeC" }> = (state) => {
+  console.log("Called A");
+  const value = Math.random() > 0.5 ? "b" : "c";
+  const goto = value === "b" ? "nodeB" : "nodeC";
+  return new Command({ update: { foo: value }, goto });
+};
 
-```text
-        ┌→ A ─┐
-START ──┤     ├→ D → END
-        └→ B ─┘
+const nodeB: GraphNode<typeof State> = (state) => ({ foo: state.foo + "b" });
+const nodeC: GraphNode<typeof State> = (state) => ({ foo: state.foo + "c" });
+
+const graph = new StateGraph(State)
+  .addNode("nodeA", nodeA, { ends: ["nodeB", "nodeC"] })
+  .addNode("nodeB", nodeB)
+  .addNode("nodeC", nodeC)
+  .addEdge(START, "nodeA")
+  .compile();
 ```
 
-```python
-builder.add_edge(START, "a")
-builder.add_edge(START, "b")
-builder.add_edge("a", "d")
-builder.add_edge("b", "d")
-```
+<Warning>
+JavaScript / TypeScript 版本需要通过 `ends` 指明 `nodeA` 可能导航到哪些 Node，这对 Graph Rendering 是必要的。
+</Warning>
+:::
 
-LangGraph 会等 A 和 B 所在 Super-step 完成后，再调度 D。
+### 导航到 Parent Graph 中的 Node
 
-如果并行分支写入同一个字段，请确保 Reducer 可以合并多份 Update。
-
-## 控制并行度
-
-动态 Fan-out 可能产生大量并发请求。生产环境中应结合：
-
-- Model / API Provider 限流；
-- Worker Semaphore；
-- Agent Server 并发配置；
-- Retry Backoff；
-- Query Budget。
-
-不要把“图支持并行”理解为“应该无限并行”。
-
-## 从 Node 内调用 Task
-
-如果一个 Node 包含多个昂贵步骤，但不希望把每一步都暴露为 Graph Node，可以使用 Functional API 的 `task`。
+使用 [Subgraph](/oss/langgraph/use-subgraphs) 时，有时需要从 Subgraph Node 跳转到 Parent Graph 中另一个 Node。此时在 `Command` 中指定 `graph=Command.PARENT`：
 
 :::python
 ```python
-from langgraph.func import task
-
-@task
-def fetch_profile(user_id: str):
-    return db.fetch_profile(user_id)
-
-@task
-def fetch_orders(user_id: str):
-    return db.fetch_orders(user_id)
-
-async def prepare_context(state: State):
-    profile = await fetch_profile(state["user_id"])
-    orders = await fetch_orders(state["user_id"])
-    return {"context": {"profile": profile, "orders": orders}}
-```
-:::
-
-Task Result 可以独立 Checkpoint，因此 Node Resume 时无需重复已经成功完成的昂贵步骤。
-
-## 添加 Retry Policy
-
-对瞬时错误配置 Retry：
-
-:::python
-```python
-from langgraph.types import RetryPolicy
-
-builder.add_node(
-    "call_api",
-    call_api,
-    retry_policy=RetryPolicy(
-        max_attempts=3,
-        initial_interval=1.0,
-        backoff_factor=2.0,
-    ),
-)
+def my_node(state: State) -> Command[Literal["other_subgraph"]]:
+    return Command(
+        update={"foo": "bar"},
+        goto="other_subgraph",
+        graph=Command.PARENT
+    )
 ```
 :::
 
 :::js
 ```typescript
-builder.addNode("callApi", callApi, {
-  retryPolicy: {
-    maxAttempts: 3,
-    initialInterval: 1000,
-    backoffFactor: 2,
-  },
-});
+const myNode = (state: State): Command => {
+  return new Command({
+    update: { foo: "bar" },
+    goto: "otherSubgraph",
+    graph: Command.PARENT
+  });
+};
 ```
 :::
 
-详见[容错](/oss/langgraph/fault-tolerance)。
-
-## 添加 Timeout 与 Error Handler
-
-高延迟外部调用可以设置 Timeout；Retry 耗尽后可以进入 Error Handler 做补偿。
+<Warning>
+**使用 `Command.PARENT` 更新 State**
+如果从 Subgraph Node 向 Parent Graph Node 发送的 Update 修改了 Parent 与 Subgraph 共同拥有的 State Key，那么 Parent Graph 中这个 Key **必须**定义 [Reducer](/oss/langgraph/graph-api#reducers)。
+</Warning>
 
 :::python
 ```python
-from langgraph.types import TimeoutPolicy
-
-builder.add_node(
-    "charge_payment",
-    charge_payment,
-    timeout=TimeoutPolicy(run_timeout=30),
-    retry_policy=RetryPolicy(max_attempts=3),
-    error_handler=payment_error_handler,
-)
-```
-:::
-
-对于支付、库存等工作流，可让 Error Handler 返回 `Command(goto="compensate")`，实现 Saga / Compensation Flow。
-
-## Deferred Node
-
-某些 Node 应该等当前 Graph 中其他可执行工作都完成后再运行，例如最终聚合器。可以配置 `defer=True`。
-
-:::python
-```python
-builder.add_node("finalize", finalize, defer=True)
-```
-:::
-
-:::js
-```typescript
-builder.addNode("finalize", finalize, { defer: true });
-```
-:::
-
-这适合“最后统一收尾”的场景，而不是依赖手工维护大量汇合 Edge。
-
-## Node 缓存
-
-对于相同输入经常重复出现的昂贵 Node，可以配置缓存。
-
-:::python
-```python
-from langgraph.cache.memory import InMemoryCache
-from langgraph.types import CachePolicy
-
-builder.add_node(
-    "expensive",
-    expensive,
-    cache_policy=CachePolicy(ttl=60),
-)
-
-graph = builder.compile(cache=InMemoryCache())
-```
-:::
-
-缓存适合纯函数或输入决定输出的操作。不要缓存包含不可预测副作用的 Node。
-
-## 持久化图
-
-向 `compile()` 传入 Checkpointer：
-
-:::python
-```python
-from langgraph.checkpoint.memory import InMemorySaver
-
-graph = builder.compile(checkpointer=InMemorySaver())
-
-config = {"configurable": {"thread_id": "1"}}
-graph.invoke(input, config)
-```
-:::
-
-:::js
-```typescript
-import { MemorySaver } from "@langchain/langgraph";
-
-const graph = builder.compile({ checkpointer: new MemorySaver() });
-const config = { configurable: { thread_id: "1" } };
-await graph.invoke(input, config);
-```
-:::
-
-生产环境应使用持久化后端。详见 [Checkpointer](/oss/langgraph/checkpointers)。
-
-## 读取当前 State
-
-:::python
-```python
-snapshot = graph.get_state(config)
-print(snapshot.values)
-print(snapshot.next)
-```
-:::
-
-:::js
-```typescript
-const snapshot = await graph.getState(config);
-console.log(snapshot.values, snapshot.next);
-```
-:::
-
-## 更新 State
-
-`update_state` 会创建新的 Checkpoint，而不是修改历史：
-
-:::python
-```python
-new_config = graph.update_state(
-    config,
-    {"status": "manually corrected"},
-)
-```
-:::
-
-更新仍会经过对应 Reducer。若要从历史 Checkpoint 分叉，参阅[时间旅行](/oss/langgraph/use-time-travel)。
-
-## 获取 State History
-
-```python
-for snapshot in graph.get_state_history(config):
-    print(snapshot.config, snapshot.values, snapshot.next)
-```
-
-可以用它构建执行历史 UI、调试某个决策点，或选择一个 Checkpoint Replay / Fork。
-
-## 人在回路
-
-在 Node 中调用 `interrupt()`：
-
-:::python
-```python
-from langgraph.types import interrupt, Command
-
-
-def approve(state: State):
-    decision = interrupt({
-        "question": "Approve this action?",
-        "action": state["action"],
-    })
-    return {"approved": decision}
-
-config = {"configurable": {"thread_id": "1"}}
-graph.invoke(input, config)
-graph.invoke(Command(resume=True), config)
-```
-:::
-
-Resume 时 Node 会从函数开头重新执行，Interrupt 之前的副作用必须幂等。完整说明参阅[中断](/oss/langgraph/interrupts)。
-
-## Streaming
-
-### State Update
-
-```python
-for chunk in graph.stream(input, stream_mode="updates"):
-    print(chunk)
-```
-
-### 完整 State
-
-```python
-for state in graph.stream(input, stream_mode="values"):
-    print(state)
-```
-
-### LLM Token
-
-```python
-for msg, metadata in graph.stream(input, stream_mode="messages"):
-    print(msg.content, end="")
-```
-
-### Event Streaming
-
-新应用优先考虑类型化 Event Streaming：
-
-```python
-stream = graph.stream_events(input, version="v3")
-for message in stream.messages:
-    print(message.text)
-
-final_state = stream.output
-```
-
-详见[流式输出](/oss/langgraph/streaming)和[事件流](/oss/langgraph/event-streaming)。
-
-## 使用 Subgraph
-
-如果 Parent / Child Graph 共享 State Key，可以直接把编译后的 Subgraph 添加为 Node：
-
-```python
-subgraph = sub_builder.compile()
-parent_builder.add_node("research", subgraph)
-```
-
-如果 Schema 不同，在 Parent Node 中调用 Subgraph 并手工转换输入输出：
-
-```python
-def call_research(state: ParentState):
-    result = research_graph.invoke({"query": state["question"]})
-    return {"research": result["answer"]}
-```
-
-详见[子图](/oss/langgraph/use-subgraphs)。
-
-## 从 Subgraph 跳转到 Parent
-
-Subgraph Node 可以返回：
-
-```python
-Command(
-    update={"status": "done"},
-    goto="parent_node",
-    graph=Command.PARENT,
-)
-```
-
-这常用于多智能体 Handoff。
-
-## 设置递归限制
-
-存在循环的图应配置合理的终止条件，并可额外设置 `recursion_limit`：
-
-:::python
-```python
-graph.invoke(input, {"recursion_limit": 100})
-```
-:::
-
-:::js
-```typescript
-await graph.invoke(input, { recursionLimit: 100 });
-```
-:::
-
-Python 还可以通过 `RemainingSteps` 在 State 中读取剩余步数，并在接近上限时主动结束。
-
-## 动态修改图结构与兼容性
-
-图部署后仍可以新增 Edge、Node 或 State Field，但已有 Thread 可能正在从旧 Checkpoint Resume。
-
-一般原则：
-
-- 新增 Optional State Field 通常安全；
-- 删除 / 重命名正在被旧 Thread 使用的 Node 可能破坏 Resume；
-- 重命名 State Key 不会自动迁移历史数据；
-- 行为语义发生变化时，可以在 State 中保存 `flow_version`，让旧 Thread 保持旧路径。
-
-详见[向后兼容](/oss/langgraph/backward-compatibility)。
-
-<a id="visualize-your-graph"></a>
-## 可视化你的图
-
-编译后的 Graph 可以导出 Mermaid 或图片。
-
-:::python
-```python
-print(graph.get_graph().draw_mermaid())
-```
-
-在 Notebook 中：
-
-```python
-from IPython.display import Image, display
-
-display(Image(graph.get_graph().draw_mermaid_png()))
-```
-:::
-
-:::js
-```typescript
-const graphRepresentation = await graph.getGraphAsync();
-console.log(graphRepresentation.drawMermaid());
-```
-:::
-
-对于大型系统，可视化能显著提高 Debugging、Code Review 与跨团队沟通效率。
-
-## 给图命名
-
-给 Graph 和 Subgraph 使用稳定名称，有助于 Streaming、Tracing 和嵌套执行定位。
-
-```python
-graph = builder.compile(name="research_agent")
-```
-
-## 一个完整的 Agent Loop
-
-下面是最典型的 LangGraph Agent 架构：
-
-:::python
-```python
-from langchain.tools import tool
-from langchain.chat_models import init_chat_model
-from langgraph.graph import MessagesState, StateGraph, START, END
-from langgraph.prebuilt import ToolNode
-
-@tool
-def search(query: str) -> str:
-    """Search the knowledge base."""
-    return f"Result for {query}"
-
-model = init_chat_model("openai:gpt-5.4-mini").bind_tools([search])
-
-
-def call_model(state: MessagesState):
-    return {"messages": [model.invoke(state["messages"])]}
-
-
-def route(state: MessagesState):
-    return "tools" if state["messages"][-1].tool_calls else END
-
-builder = StateGraph(MessagesState)
-builder.add_node("model", call_model)
-builder.add_node("tools", ToolNode([search]))
-builder.add_edge(START, "model")
-builder.add_conditional_edges("model", route, ["tools", END])
-builder.add_edge("tools", "model")
-
+import operator
+from typing_extensions import Annotated
+
+class State(TypedDict):
+    foo: Annotated[str, operator.add]
+
+def node_a(state: State):
+    print("Called A")
+    value = random.choice(["a", "b"])
+    goto = "node_b" if value == "a" else "node_c"
+    return Command(
+        update={"foo": value},
+        goto=goto,
+        graph=Command.PARENT,
+    )
+
+subgraph = StateGraph(State).add_node(node_a).add_edge(START, "node_a").compile()
+
+def node_b(state: State):
+    print("Called B")
+    return {"foo": "b"}
+
+def node_c(state: State):
+    print("Called C")
+    return {"foo": "c"}
+
+builder = StateGraph(State)
+builder.add_edge(START, "subgraph")
+builder.add_node("subgraph", subgraph)
+builder.add_node(node_b)
+builder.add_node(node_c)
 graph = builder.compile()
 ```
 :::
 
-如果只需要标准 ReAct / Tool-calling Agent，优先使用 LangChain [`create_agent`](/oss/langchain/agents)。直接使用 Graph API 的价值在于：你可以精确控制特殊路由、审批、Subgraph、Memory、Fault Tolerance 与业务状态机。
+### 在 Tool 内使用
 
-## 设计建议
+一个常见需求是在 Tool 内直接更新 Graph State。例如 Customer Support 应用可以在对话开始时，根据 Account ID 查询 Customer Info。Tool 可以返回 `Command(update={...})`：
 
-### Node 应代表有意义的执行边界
+:::python
+```python
+from langchain.tools import ToolRuntime
 
-不要把每一行代码都拆成 Node。一个操作如果值得独立：
+@tool
+def lookup_user_info(runtime: ToolRuntime):
+    """Use this to look up user information to better assist them with their questions."""
+    user_info = get_user_info(runtime.server_info.user.identity)
+    return Command(
+        update={
+            "user_info": user_info,
+            "messages": [ToolMessage("Successfully looked up user information", tool_call_id=runtime.tool_call_id)]
+        }
+    )
+```
+:::
 
-- Trace；
-- Retry；
-- Checkpoint；
-- Interrupt；
-- Route；
+:::js
+```typescript
+import { tool } from "@langchain/core/tools";
+import { Command } from "@langchain/langgraph";
+import * as z from "zod";
 
-它通常才值得成为 Node。
+const lookupUserInfo = tool(
+  async (input, runtime) => {
+    const userId = runtime.serverInfo?.user?.identity;
+    const userInfo = getUserInfo(userId);
+    return new Command({
+      update: {
+        userInfo: userInfo,
+        messages: [{
+          role: "tool",
+          content: "Successfully looked up user information",
+          tool_call_id: runtime.toolCall.id
+        }]
+      }
+    });
+  },
+  {
+    name: "lookupUserInfo",
+    description: "Use this to look up user information to better assist them with their questions.",
+    schema: z.object({}),
+  }
+);
+```
+:::
 
-### 把 Routing 与业务动作分开
+<Warning>
+Tool 返回 @[`Command`] 时，如果 Graph 的 Message History 存在于 `messages`（或其他 State Key），`Command.update` **必须**包含这个 Message Key，而且其中必须包含与 Tool Call 对应的 `ToolMessage`。LLM Provider 要求带 Tool Call 的 AI Message 后紧跟 Tool Result Message，否则 Message History 不合法。
+</Warning>
 
-纯 Routing 用 Conditional Edge；同时更新 State 和 Routing 用 `Command`。不要让一个函数同时承担太多职责。
+如果 Tool 会通过 @[`Command`] 更新 State，推荐使用预构建 @[`ToolNode`]。它能够自动处理 Tool 返回的 `Command` 并传播到 Graph State。自定义 Tool-calling Node 则需要手动把 Tool 返回的 `Command` 作为 Node Update 传播。
 
-### 副作用必须考虑 Resume
+## 可视化 Graph
 
-使用 Checkpointer 后，Node 可能因为 Retry 或 Interrupt 从开头重新执行。数据库写入、支付、发邮件等外部副作用应使用 Idempotency Key、Upsert 或独立 Task。
+LangGraph 可以可视化任意 [Graph](https://reference.langchain.com/python/langgraph/graphs/)，包括 @[`StateGraph`]。
 
-### State 保存事实，而不是所有局部变量
+:::python
+下面通过绘制 Fractal Graph 展示可视化能力：
 
-可以重新计算的临时值通常没必要进入 State。长期跨 Thread 数据使用 [Store](/oss/langgraph/stores)，外部业务权威数据仍留在数据库。
+```python
+import random
+from typing import Annotated, Literal
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
 
-## 下一步
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
 
-- [Graph API 概览](/oss/langgraph/graph-api)：理解底层概念。
-- [用 LangGraph 的方式思考](/oss/langgraph/thinking-in-langgraph)：从业务流程设计 State / Node / Edge。
-- [持久化](/oss/langgraph/persistence)：配置 Checkpointer。
-- [子图](/oss/langgraph/use-subgraphs)：拆分复杂系统。
-- [容错](/oss/langgraph/fault-tolerance)：配置 Retry、Timeout 与 Error Handler。
+class MyNode:
+    def __init__(self, name: str):
+        self.name = name
+    def __call__(self, state: State):
+        return {"messages": [("assistant", f"Called node {self.name}")]}
+
+def route(state) -> Literal["entry_node", END]:
+    if len(state["messages"]) > 10:
+        return END
+    return "entry_node"
+
+def add_fractal_nodes(builder, current_node, level, max_level):
+    if level > max_level:
+        return
+    num_nodes = random.randint(1, 3)
+    for i in range(num_nodes):
+        nm = ["A", "B", "C"][i]
+        node_name = f"node_{current_node}_{nm}"
+        builder.add_node(node_name, MyNode(node_name))
+        builder.add_edge(current_node, node_name)
+        r = random.random()
+        if r > 0.2 and level + 1 < max_level:
+            add_fractal_nodes(builder, node_name, level + 1, max_level)
+        elif r > 0.05:
+            builder.add_conditional_edges(node_name, route, node_name)
+        else:
+            builder.add_edge(node_name, END)
+
+def build_fractal_graph(max_level: int):
+    builder = StateGraph(State)
+    entry_point = "entry_node"
+    builder.add_node(entry_point, MyNode(entry_point))
+    builder.add_edge(START, entry_point)
+    add_fractal_nodes(builder, entry_point, 1, max_level)
+    builder.add_edge(entry_point, END)
+    return builder.compile()
+
+app = build_fractal_graph(3)
+```
+:::
+
+:::js
+下面创建一张简单 Graph 展示 Visualization：
+
+```typescript
+import { StateGraph, StateSchema, MessagesValue, ReducedValue, GraphNode, ConditionalEdgeRouter, START, END } from "@langchain/langgraph";
+import * as z from "zod";
+
+const State = new StateSchema({
+  messages: MessagesValue,
+  value: new ReducedValue(
+    z.number().default(0),
+    { reducer: (x, y) => x + y }
+  ),
+});
+
+const node1: GraphNode<typeof State> = (state) => ({ value: state.value + 1 });
+const node2: GraphNode<typeof State> = (state) => ({ value: state.value * 2 });
+
+const router: ConditionalEdgeRouter<{ InputSchema: typeof State; Nodes: "node2" }> = (state) => {
+  if (state.value < 10) return "node2";
+  return END;
+};
+
+const app = new StateGraph(State)
+  .addNode("node1", node1)
+  .addNode("node2", node2)
+  .addEdge(START, "node1")
+  .addConditionalEdges("node1", router)
+  .addEdge("node2", "node1")
+  .compile();
+```
+:::
+
+### Mermaid
+
+可以把 Graph 转成 Mermaid Syntax。
+
+:::python
+```python
+print(app.get_graph().draw_mermaid())
+```
+:::
+
+:::js
+```typescript
+const drawableGraph = await app.getGraphAsync();
+console.log(drawableGraph.drawMermaid());
+```
+:::
+
+### PNG
+
+:::python
+也可以直接渲染成 `.png`，支持三种方式：
+
+* Mermaid.ink API（无需额外 Package）
+* Mermaid + Pyppeteer（需要 `pip install pyppeteer`）
+* Graphviz（需要 `pip install graphviz`）
+
+**使用 Mermaid.Ink**
+
+```python
+from IPython.display import Image, display
+from langchain_core.runnables.graph import CurveStyle, MermaidDrawMethod, NodeStyles
+
+display(Image(app.get_graph().draw_mermaid_png()))
+```
+
+![Fractal graph visualization](/oss/images/graph_api_image_10.png)
+
+**使用 Mermaid + Pyppeteer**
+
+```python
+import nest_asyncio
+
+nest_asyncio.apply()
+
+display(
+    Image(
+        app.get_graph().draw_mermaid_png(
+            curve_style=CurveStyle.LINEAR,
+            node_colors=NodeStyles(first="#ffdfba", last="#baffc9", default="#fad7de"),
+            wrap_label_n_words=9,
+            output_file_path=None,
+            draw_method=MermaidDrawMethod.PYPPETEER,
+            background_color="white",
+            padding=10,
+        )
+    )
+)
+```
+
+**使用 Graphviz**
+
+```python
+try:
+    display(Image(app.get_graph().draw_png()))
+except ImportError:
+    print(
+        "You likely need to install dependencies for pygraphviz, see more here https://github.com/pygraphviz/pygraphviz/blob/main/INSTALL.txt"
+    )
+```
+:::
+
+:::js
+也可以直接把 Graph 渲染成 `.png`，这里使用 Mermaid.ink API：
+
+```typescript
+import * as fs from "node:fs/promises";
+
+const drawableGraph = await app.getGraphAsync();
+const image = await drawableGraph.drawMermaidPng();
+const imageBuffer = new Uint8Array(await image.arrayBuffer());
+
+await fs.writeFile("graph.png", imageBuffer);
+```
+:::
